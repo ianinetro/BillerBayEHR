@@ -1,7 +1,8 @@
 version: "3.9"
 
-# Frontend is served by Cloudflare Pages (not a local container).
-# This compose file runs: PostgreSQL + Django API + cloudflared tunnel.
+# Frontend is served by Cloudflare Pages.
+# This compose file runs: PostgreSQL + Django API + nginx (port 80).
+# Cloudflare proxied A record → Ubuntu:80 → nginx → Django:8000
 
 services:
   db:
@@ -10,8 +11,6 @@ services:
       POSTGRES_DB: clinictraq
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: clinictraq
-    ports:
-      - "5432:5432"
     volumes:
       - pg_data:/var/lib/postgresql/data
     restart: unless-stopped
@@ -24,8 +23,6 @@ services:
   backend:
     build: ./backend
     command: sh -c "python manage.py migrate && python manage.py runserver 0.0.0.0:8000"
-    ports:
-      - "8000:8000"
     env_file:
       - ./backend/.env
     depends_on:
@@ -35,11 +32,12 @@ services:
       - ./backend:/app
     restart: unless-stopped
 
-  tunnel:
-    image: cloudflare/cloudflared:latest
-    command: tunnel --no-autoupdate run
-    environment:
-      - TUNNEL_TOKEN=${TUNNEL_TOKEN}
+  nginx:
+    image: nginx:alpine
+    ports:
+      - "80:80"
+    volumes:
+      - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
     depends_on:
       - backend
     restart: unless-stopped
