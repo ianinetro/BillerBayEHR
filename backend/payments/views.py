@@ -1,11 +1,19 @@
-from rest_framework import viewsets, filters, status
-from rest_framework.decorators import action, api_view, parser_classes
+from decimal import Decimal
+
+from django.db.models import Count, Q, Sum
+from django.utils import timezone
+from django_filters.rest_framework import DjangoFilterBackend
+from rest_framework import filters, status, viewsets
+from rest_framework.decorators import action
 from rest_framework.parsers import MultiPartParser
 from rest_framework.response import Response
-from django_filters.rest_framework import DjangoFilterBackend
-from django.utils import timezone
-from .models import Payment, PaymentApplication, ERAException
-from .serializers import PaymentSerializer, PaymentApplicationSerializer, ERAExceptionSerializer
+
+from .models import ERAException, Payment, PaymentApplication
+from .serializers import ERAExceptionSerializer, PaymentApplicationSerializer, PaymentSerializer
+
+
+def _is_zip(data: bytes) -> bool:
+    return data[:2] == b"PK"
 
 
 class PaymentViewSet(viewsets.ModelViewSet):
@@ -22,7 +30,6 @@ class PaymentViewSet(viewsets.ModelViewSet):
         """
         Attempt automatic posting of an ERA payment by matching ERA line items
         to claims in the database.  Unmatched lines remain as ERAException records.
-        Returns counts of posted applications and remaining exceptions.
         """
         payment = self.get_object()
 
@@ -65,9 +72,7 @@ class PaymentViewSet(viewsets.ModelViewSet):
             else:
                 exception_count += 1
 
-        total_applied = sum(
-            a.amount for a in payment.applications.filter(reversed=False)
-        )
+        total_applied = sum(a.amount for a in payment.applications.filter(reversed=False))
         payment.applied = total_applied
         payment.unapplied = payment.amount - total_applied
         if exception_count == 0 and payment.unapplied == 0:
@@ -134,9 +139,7 @@ class PaymentViewSet(viewsets.ModelViewSet):
         exc.confidence_pct = 100
         exc.save(update_fields=["resolved", "possible_match_claim", "confidence_pct"])
 
-        total_applied = sum(
-            a.amount for a in payment.applications.filter(reversed=False)
-        )
+        total_applied = sum(a.amount for a in payment.applications.filter(reversed=False))
         payment.applied = total_applied
         payment.unapplied = payment.amount - total_applied
         payment.save(update_fields=["applied", "unapplied", "updated_at"])
@@ -152,13 +155,34 @@ class PaymentViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=["post"], url_path="import-era", parser_classes=[MultiPartParser])
     def import_era(self, request):
         """
-        Accept an 835 ERA file upload, create a Payment record, and trigger async processing.
+        Accept an 835 ERA file upload (raw EDI, ZIP archive, or spreadsheet),
+        create a Payment record, and trigger async processing.
+
+        Accepts:
+          - .835 / .edi / .txt  — raw X12 EDI
+          - .zip               — ZIP archive containing a .835 file (OfficeAlly bundle)
         """
         era_file = request.FILES.get("file")
         if not era_file:
             return Response({"detail": "No file uploaded."}, status=status.HTTP_400_BAD_REQUEST)
 
-        file_content = era_file.read().decode("utf-8", errors="replace")
+        raw_bytes = era_file.read()
+
+        # ZIP detection: extract the .835 from the archive before storing content
+        filename = era_file.name or "era.835"
+        if _is_zip(raw_bytes) or filename.lower().endswith(".zip"):
+            from edi.parsers.x12_835_parser import extract_835_from_zip
+            try:
+                file_content = extract_835_from_zip(raw_bytes)
+                filename = filename.rsplit(".", 1)[0] + ".835"
+            except ValueError as e:
+                return Response(
+                    {"detail": f"ZIP extraction failed: {e}"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+        else:
+            file_content = raw_bytes.decode("utf-8", errors="replace")
+
         payment = Payment.objects.create(
             payment_date=timezone.now().date(),
             payer_type=Payment.PayerType.INSURANCE,
@@ -166,7 +190,7 @@ class PaymentViewSet(viewsets.ModelViewSet):
             method=Payment.Method.EFT,
             amount=0,
             source=Payment.Source.ERA,
-            era_file=era_file.name,
+            era_file=filename,
             status=Payment.Status.DRAFT,
         )
 
@@ -176,4 +200,112 @@ class PaymentViewSet(viewsets.ModelViewSet):
         return Response(
             {"detail": "ERA file received. Processing in background.", "payment_id": payment.payment_id},
             status=status.HTTP_202_ACCEPTED,
+        )
+
+    @action(detail=False, methods=["get"], url_path="era-dashboard")
+    def era_dashboard(self, request):
+        """
+        Summary statistics for the ERA 835 dashboard.
+
+        Returns KPI cards, by-payer breakdown, and top denial reasons.
+        """
+        era_payments = Payment.objects.filter(source=Payment.Source.ERA)
+
+        total_payments = era_payments.count()
+        total_amount = era_payments.aggregate(s=Sum("amount"))["s"] or Decimal("0")
+        total_applied = era_payments.aggregate(s=Sum("applied"))["s"] or Decimal("0")
+        total_unapplied = era_payments.aggregate(s=Sum("unapplied"))["s"] or Decimal("0")
+
+        unresolved_exceptions = ERAException.objects.filter(resolved=False)
+        unresolved_count = unresolved_exceptions.count()
+        unresolved_amount = unresolved_exceptions.aggregate(s=Sum("paid_amount"))["s"] or Decimal("0")
+
+        status_breakdown = list(
+            era_payments.values("status")
+            .annotate(count=Count("id"), amount=Sum("amount"))
+            .order_by("-count")
+        )
+
+        by_payer = list(
+            era_payments.values("payer_name")
+            .annotate(
+                count=Count("id"),
+                total=Sum("amount"),
+                applied=Sum("applied"),
+                unapplied=Sum("unapplied"),
+            )
+            .order_by("-total")[:10]
+        )
+
+        top_denial_reasons = list(
+            ERAException.objects.filter(resolved=False)
+            .values("adjustment_reason")
+            .annotate(
+                count=Count("id"),
+                amount=Sum("paid_amount"),
+            )
+            .order_by("-count")[:10]
+        )
+
+        top_denial_groups = list(
+            ERAException.objects.filter(resolved=False, adjustment_group__gt="")
+            .values("adjustment_group")
+            .annotate(count=Count("id"), amount=Sum("paid_amount"))
+            .order_by("-count")
+        )
+
+        recent_payments = list(
+            era_payments.order_by("-payment_date", "-created_at")
+            .values(
+                "payment_id", "payment_date", "payer_name",
+                "amount", "applied", "unapplied", "status",
+            )[:10]
+        )
+
+        return Response(
+            {
+                "kpis": {
+                    "total_era_payments": total_payments,
+                    "total_amount": str(total_amount),
+                    "total_applied": str(total_applied),
+                    "total_unapplied": str(total_unapplied),
+                    "unresolved_exceptions": unresolved_count,
+                    "unresolved_exception_amount": str(unresolved_amount),
+                },
+                "status_breakdown": status_breakdown,
+                "by_payer": by_payer,
+                "top_denial_reasons": top_denial_reasons,
+                "top_denial_groups": top_denial_groups,
+                "recent_payments": recent_payments,
+            }
+        )
+
+    @action(detail=False, methods=["get"], url_path="era-exceptions")
+    def era_exceptions(self, request):
+        """
+        Paginated list of unresolved ERA exceptions across all ERA payments.
+        Supports ?resolved=true|false and ?payment_id= filtering.
+        """
+        qs = ERAException.objects.select_related("payment", "possible_match_claim")
+
+        resolved = request.query_params.get("resolved")
+        if resolved is not None:
+            qs = qs.filter(resolved=resolved.lower() == "true")
+
+        payment_id = request.query_params.get("payment_id")
+        if payment_id:
+            qs = qs.filter(payment__payment_id=payment_id)
+
+        page_size = min(int(request.query_params.get("page_size", 50)), 200)
+        page = max(int(request.query_params.get("page", 1)), 1)
+        total = qs.count()
+        items = qs[(page - 1) * page_size: page * page_size]
+        serializer = ERAExceptionSerializer(items, many=True)
+        return Response(
+            {
+                "count": total,
+                "page": page,
+                "page_size": page_size,
+                "results": serializer.data,
+            }
         )

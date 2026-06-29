@@ -157,9 +157,12 @@ class ERAException(models.Model):
     patient_name_on_era = models.CharField(max_length=255)
     claim_id_on_era = models.CharField(max_length=50)
     dos = models.DateField(verbose_name="Date of service on ERA")
-    cpt_code = models.CharField(max_length=10)
+    cpt_code = models.CharField(max_length=10, blank=True, default="")
+    charged_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     paid_amount = models.DecimalField(max_digits=12, decimal_places=2)
-    adjustment_reason = models.CharField(max_length=500)
+    adjustment_group = models.CharField(max_length=10, blank=True, default="")
+    adjustment_reason = models.CharField(max_length=500, blank=True, default="")
+    remark_code = models.CharField(max_length=20, blank=True, default="")
 
     # Suggested match
     possible_match_claim = models.ForeignKey(

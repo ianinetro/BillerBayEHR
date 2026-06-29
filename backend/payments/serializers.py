@@ -10,6 +10,10 @@ class PaymentApplicationSerializer(serializers.ModelSerializer):
 
 
 class ERAExceptionSerializer(serializers.ModelSerializer):
+    possible_match_claim_id = serializers.CharField(
+        source="possible_match_claim.claim_id", read_only=True, allow_null=True
+    )
+
     class Meta:
         model = ERAException
         fields = "__all__"
