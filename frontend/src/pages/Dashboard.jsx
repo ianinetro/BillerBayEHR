@@ -1,31 +1,44 @@
 import React from 'react';
 import { useNavigate } from 'react-router-dom';
+import { useQuery } from '@tanstack/react-query';
 import Badge from '../components/Badge';
+import { listWorkQueue } from '../api/billing';
 
-const KPIS = [
-  { label: 'Ready to submit', value: 18, hint: '$12,840.45 total charges' },
-  { label: 'Validation failed', value: 7, hint: '4 blocking issues' },
-  { label: 'Rejected claims', value: 5, hint: 'Oldest 9 days' },
-  { label: 'ERA exceptions', value: 12, hint: '$430.00 unmatched' },
-  { label: 'A/R over 90', value: 23, hint: '$18,920.10 at risk' },
-];
+const fmt = n => '$' + Number(n || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
-const WORK = [
-  { type: 'Validation failed', priority: 'Overdue', patient: 'Maria Sanchez', visit: 'V-20491', claim: 'BB-2026-000183', payer: 'Medicare', amount: '$320.00', reason: 'Missing insured relationship', owner: 'Lina', age: '2d' },
-  { type: 'ERA unmatched', priority: 'Overdue', patient: 'Unknown from ERA', visit: '—', claim: 'CLM-8834', payer: 'Medicare', amount: '$430.00', reason: 'Possible match confidence 62%', owner: 'Maya', age: '1d' },
-  { type: 'Rejected claim', priority: 'Overdue', patient: 'Ellen Brooks', visit: 'V-20480', claim: 'BB-2026-000178', payer: 'Aetna', amount: '$220.00', reason: '277CA invalid payer ID', owner: 'Omar', age: '9d' },
-  { type: 'A/R follow-up', priority: 'Warning', patient: 'Thomas Green', visit: 'V-20460', claim: 'BB-2026-000177', payer: 'Humana', amount: '$650.00', reason: 'No payer response in 74 days', owner: 'Lina', age: '74d' },
-];
+function kpisFromQueue(items) {
+  const byType = {};
+  for (const item of items) {
+    if (!byType[item.item_type]) byType[item.item_type] = { count: 0, amount: 0 };
+    byType[item.item_type].count++;
+    byType[item.item_type].amount += Number(item.amount || 0);
+  }
+  return [
+    { label: 'Ready to submit', value: byType['Ready to submit']?.count ?? 0, hint: fmt(byType['Ready to submit']?.amount) + ' total charges' },
+    { label: 'Validation failed', value: byType['Validation failed']?.count ?? 0, hint: 'Blocking issues' },
+    { label: 'Rejected claims', value: byType['Rejected claim']?.count ?? 0, hint: 'Need rework' },
+    { label: 'ERA exceptions', value: byType['ERA unmatched']?.count ?? 0, hint: fmt(byType['ERA unmatched']?.amount) + ' unmatched' },
+    { label: 'A/R follow-up', value: byType['A/R follow-up']?.count ?? 0, hint: fmt(byType['A/R follow-up']?.amount) + ' at risk' },
+  ];
+}
 
 const TIMELINE = [
-  { title: 'Patient updated', detail: 'P10042 insurance verified 22 minutes ago.' },
-  { title: 'Visit ready for billing', detail: 'V-20491 has diagnosis and service lines.' },
-  { title: 'Claim blocked', detail: 'BB-2026-000183 needs subscriber relationship.' },
-  { title: 'ERA imported', detail: 'PMT-9012 imported with 3 exceptions.' },
+  { title: 'Patient updated', detail: 'Insurance verification complete.' },
+  { title: 'Visit ready for billing', detail: 'Visit has diagnosis and service lines.' },
+  { title: 'Claim blocked', detail: 'Claim needs subscriber relationship.' },
+  { title: 'ERA imported', detail: 'ERA imported — exceptions need review.' },
 ];
 
 export default function Dashboard() {
   const navigate = useNavigate();
+  const { data, isLoading } = useQuery({
+    queryKey: ['work-queue'],
+    queryFn: () => listWorkQueue({ resolved: false, page_size: 100 }),
+  });
+  const items = data?.results || [];
+  const kpis = kpisFromQueue(items);
+  const topWork = items.slice(0, 5);
+
   return (
     <div>
       <div className="header">
@@ -40,10 +53,10 @@ export default function Dashboard() {
       </div>
 
       <div className="grid kpis">
-        {KPIS.map(k => (
+        {kpis.map(k => (
           <div key={k.label} className="card pad kpi">
             <div className="label">{k.label}</div>
-            <div className="value">{k.value}</div>
+            <div className="value">{isLoading ? '…' : k.value}</div>
             <div className="hint">{k.hint}</div>
           </div>
         ))}
@@ -54,7 +67,7 @@ export default function Dashboard() {
           <div className="toolbar">
             <div>
               <strong>Highest priority work</strong>
-              <div className="sub">Queue items include reason, owner, age, and next action.</div>
+              <div className="sub">Queue items with reason, owner, age, and next action.</div>
             </div>
             <button className="btn" onClick={() => navigate('/billing')}>View all</button>
           </div>
@@ -68,14 +81,23 @@ export default function Dashboard() {
                 </tr>
               </thead>
               <tbody>
-                {WORK.map((r, i) => (
-                  <tr key={i} className="clickable"
-                    onClick={() => r.claim.startsWith('BB') && navigate(`/claims/${r.claim}`)}>
-                    <td>{r.type}</td><td><Badge status={r.priority} /></td>
-                    <td>{r.patient}</td><td className="mono">{r.visit}</td>
-                    <td className="mono">{r.claim}</td><td>{r.payer}</td>
-                    <td className="right">{r.amount}</td><td>{r.reason}</td>
-                    <td>{r.owner}</td><td>{r.age}</td>
+                {isLoading && <tr><td colSpan={10} className="muted" style={{ padding: '24px 20px', textAlign: 'center' }}>Loading…</td></tr>}
+                {!isLoading && topWork.length === 0 && (
+                  <tr><td colSpan={10} className="muted" style={{ padding: '24px 20px', textAlign: 'center' }}>No open work items.</td></tr>
+                )}
+                {topWork.map(r => (
+                  <tr key={r.id} className="clickable"
+                    onClick={() => r.claim_id && navigate(`/claims/${r.claim_id}`)}>
+                    <td>{r.item_type}</td>
+                    <td><Badge status={r.priority === 'High' ? 'Overdue' : r.priority === 'Med' ? 'Warning' : r.priority} /></td>
+                    <td>{r.patient_name}</td>
+                    <td className="mono">{r.visit_id || '—'}</td>
+                    <td className="mono">{r.claim_id || '—'}</td>
+                    <td>{r.payer}</td>
+                    <td className="right">{fmt(r.amount)}</td>
+                    <td>{r.reason}</td>
+                    <td>{r.assigned_to || '—'}</td>
+                    <td>{r.age_days}d</td>
                   </tr>
                 ))}
               </tbody>

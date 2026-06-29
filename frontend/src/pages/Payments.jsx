@@ -1,10 +1,11 @@
-import React, { useState } from 'react';
+import React, { useState, useRef } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import Badge from '../components/Badge';
 import Modal from '../components/Modal';
-import { listPayments, createPayment } from '../api/payments';
+import { listPayments, createPayment, importERA, autoPostERA, matchException } from '../api/payments';
+import { useToast } from '../components/Toast';
 
-const fmt = n => '$' + Number(n).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const fmt = n => '$' + Number(n || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
 const TABS = ['payments', 'applied', 'era-autopost', 'unmatched', 'reconciliation'];
 const TAB_LABELS = { payments: 'Payments', applied: 'Applied', 'era-autopost': 'ERA Auto-post', unmatched: 'Unmatched', reconciliation: 'Reconciliation' };
@@ -14,10 +15,12 @@ const BLANK = { payer_type: 'Insurance', payer: '', method: 'EFT', check_number:
 
 export default function Payments() {
   const qc = useQueryClient();
+  const toast = useToast();
   const [tab, setTab] = useState('payments');
   const [showAdd, setShowAdd] = useState(false);
   const [form, setForm] = useState(BLANK);
   const [formErr, setFormErr] = useState('');
+  const eraInputRef = useRef(null);
 
   const { data, isLoading } = useQuery({
     queryKey: ['payments'],
@@ -32,11 +35,25 @@ export default function Payments() {
       setShowAdd(false);
       setForm({ ...BLANK, payment_date: today() });
       setFormErr('');
+      toast.success('Payment saved.');
     },
     onError: e => {
       const d = e.response?.data;
-      setFormErr(d?.detail || (typeof d === 'object' ? JSON.stringify(d) : '') || 'Error saving payment.');
+      const msg = d?.detail || (typeof d === 'object' ? JSON.stringify(d) : '') || 'Error saving payment.';
+      setFormErr(msg);
     },
+  });
+
+  const importMut = useMutation({
+    mutationFn: importERA,
+    onSuccess: r => { qc.invalidateQueries({ queryKey: ['payments'] }); toast.success(`ERA received: ${r.payment_id}. Processing in background.`); },
+    onError: () => toast.error('ERA import failed.'),
+  });
+
+  const autoPostMut = useMutation({
+    mutationFn: paymentId => autoPostERA(paymentId),
+    onSuccess: r => { qc.invalidateQueries({ queryKey: ['payments'] }); toast.success(`Auto-post: ${r.posted_applications} applied, ${r.remaining_exceptions} exception(s).`); },
+    onError: () => toast.error('Auto-post failed.'),
   });
 
   function handleSubmit(e) {
@@ -44,7 +61,14 @@ export default function Payments() {
     if (!form.payer.trim()) { setFormErr('Payer name is required.'); return; }
     if (!form.amount || isNaN(Number(form.amount))) { setFormErr('Enter a valid amount.'); return; }
     setFormErr('');
-    addMutation.mutate({ ...form, amount: Number(form.amount) });
+    addMutation.mutate({ ...form, amount: Number(form.amount), payer_name: form.payer });
+  }
+
+  function handleERAFile(e) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    importMut.mutate(file);
+    e.target.value = '';
   }
 
   function set(k, v) { setForm(f => ({ ...f, [k]: v })); }
@@ -59,8 +83,15 @@ export default function Payments() {
         </div>
         <div className="actions">
           <button className="btn" onClick={() => { setForm({ ...BLANK, payment_date: today() }); setFormErr(''); setShowAdd(true); }}>+ Add payment</button>
-          <button className="btn" onClick={() => alert('Import ERA — select 835 file to upload.')}>Import ERA</button>
-          <button className="btn primary" onClick={() => alert('Auto-post ERA — review and confirm ERA matching.')}>Auto-post ERA</button>
+          <button className="btn" onClick={() => eraInputRef.current?.click()} disabled={importMut.isPending}>
+            {importMut.isPending ? 'Uploading…' : 'Import ERA'}
+          </button>
+          <input ref={eraInputRef} type="file" accept=".835,.txt,.edi,.x12" style={{ display: 'none' }} onChange={handleERAFile} />
+          <button className="btn primary" onClick={() => {
+            const eraPayments = payments.filter(p => p.source === '835 ERA' && p.status !== 'Posted');
+            if (eraPayments.length === 0) { toast.warn('No unposted ERA payments found.'); return; }
+            eraPayments.forEach(p => autoPostMut.mutate(p.id));
+          }}>Auto-post ERA</button>
         </div>
       </div>
 
@@ -100,12 +131,12 @@ export default function Payments() {
                     <td className="mono">{p.payment_id}</td>
                     <td>{p.payment_date}</td>
                     <td>{p.payer_type}</td>
-                    <td>{p.payer}</td>
+                    <td>{p.payer_name || p.payer}</td>
                     <td>{p.method}</td>
-                    <td className="mono">{p.check_number || '—'}</td>
+                    <td className="mono">{p.check_auth_number || p.check_number || '—'}</td>
                     <td className="right">{fmt(p.amount)}</td>
                     <td className="right">{fmt(p.applied || 0)}</td>
-                    <td className="right">{fmt(p.unapplied || p.amount)}</td>
+                    <td className="right">{fmt(p.unapplied != null ? p.unapplied : p.amount)}</td>
                     <td><Badge status={p.status} /></td>
                     <td>{p.where_applied || '—'}</td>
                     <td>{p.source || '—'}</td>
@@ -127,14 +158,9 @@ export default function Payments() {
               </thead>
               <tbody>
                 <tr>
-                  <td>06/27/2026</td><td>Maria Sanchez</td><td>V-20491</td><td>BB-2026-000183</td>
-                  <td>Patient payment</td><td className="right">$50.00</td><td className="mono">PMT-9013</td><td>Lina</td>
-                  <td><button className="btn sm danger">Reverse</button></td>
-                </tr>
-                <tr>
-                  <td>06/27/2026</td><td>Victor Chen</td><td>V-20460</td><td>BB-2026-000171</td>
-                  <td>Insurance payment</td><td className="right">$92.00</td><td className="mono">PMT-9012</td><td>System</td>
-                  <td><button className="btn sm">View</button></td>
+                  <td colSpan={9} className="muted" style={{ textAlign: 'center', padding: 24 }}>
+                    Applied payment lines load here after ERA auto-post or manual posting.
+                  </td>
                 </tr>
               </tbody>
             </table>
@@ -146,24 +172,30 @@ export default function Payments() {
             <table className="table">
               <thead>
                 <tr>
-                  <th>Check</th><th>Payer on claim</th><th>Payer on check</th>
-                  <th className="right">Payment</th><th className="right">Applied</th><th className="right">Unapplied</th>
-                  <th>ERA status</th><th>Confidence</th><th>Exceptions</th><th>Next action</th>
+                  <th>Payment ID</th><th>Payer</th><th className="right">Amount</th>
+                  <th className="right">Applied</th><th className="right">Unapplied</th>
+                  <th>ERA status</th><th>Action</th>
                 </tr>
               </thead>
               <tbody>
-                <tr>
-                  <td>EFT-88301</td><td>Medicare</td><td>Medicare</td>
-                  <td className="right">$12,840.45</td><td className="right">$12,410.45</td><td className="right">$430.00</td>
-                  <td><Badge status="Posted with warnings" /></td><td>92%</td><td>3</td>
-                  <td><button className="btn sm primary" onClick={() => alert('Opening ERA exceptions…')}>Review exceptions</button></td>
-                </tr>
-                <tr>
-                  <td>CHK-10882</td><td>BCBS</td><td>BCBS Texas</td>
-                  <td className="right">$3,120.78</td><td className="right">$0.00</td><td className="right">$3,120.78</td>
-                  <td><Badge status="Unmatched" /></td><td>41%</td><td>8</td>
-                  <td><button className="btn sm">Manual match</button></td>
-                </tr>
+                {payments.filter(p => p.source === '835 ERA').length === 0 && (
+                  <tr><td colSpan={7} className="muted" style={{ textAlign: 'center', padding: 24 }}>No ERA payments imported yet. Use "Import ERA" to upload an 835 file.</td></tr>
+                )}
+                {payments.filter(p => p.source === '835 ERA').map(p => (
+                  <tr key={p.id}>
+                    <td className="mono">{p.payment_id}</td>
+                    <td>{p.payer_name}</td>
+                    <td className="right">{fmt(p.amount)}</td>
+                    <td className="right">{fmt(p.applied || 0)}</td>
+                    <td className="right">{fmt(p.unapplied != null ? p.unapplied : p.amount)}</td>
+                    <td><Badge status={p.status} /></td>
+                    <td>
+                      <button className="btn sm primary" disabled={autoPostMut.isPending} onClick={() => autoPostMut.mutate(p.id)}>
+                        Auto-post
+                      </button>
+                    </td>
+                  </tr>
+                ))}
               </tbody>
             </table>
           </div>
@@ -174,20 +206,15 @@ export default function Payments() {
             <table className="table">
               <thead>
                 <tr>
-                  <th>Patient from ERA</th><th>Claim no. from ERA</th><th>DOS</th><th>CPT</th>
+                  <th>Patient from ERA</th><th>Claim no. from ERA</th><th>DOS</th>
                   <th className="right">Paid</th><th>Adj reason</th><th>Possible match</th><th>Confidence</th><th>Action</th>
                 </tr>
               </thead>
               <tbody>
                 <tr>
-                  <td>M Sanchez</td><td>BB-2026-000183</td><td>06/24/2026</td><td>20610</td>
-                  <td className="right">$0.00</td><td>Deductible</td><td>Maria Sanchez / V-20491</td><td>62%</td>
-                  <td><button className="btn sm primary" onClick={() => alert('ERA line matched.')}>Accept match</button></td>
-                </tr>
-                <tr>
-                  <td>T Green</td><td>LEGACY-744</td><td>05/29/2026</td><td>99214</td>
-                  <td className="right">$88.00</td><td>CO-45</td><td>BB-2026-000177</td><td>74%</td>
-                  <td><button className="btn sm">Review</button></td>
+                  <td colSpan={8} className="muted" style={{ textAlign: 'center', padding: 24 }}>
+                    Unmatched ERA lines appear here after auto-post runs.
+                  </td>
                 </tr>
               </tbody>
             </table>
@@ -198,11 +225,7 @@ export default function Payments() {
           <div style={{ padding: 20, display: 'flex', flexDirection: 'column', gap: 12 }}>
             <div className="alert info">
               <strong>ERA/EFT reconciliation</strong>
-              <div className="sub">PMT-9012 ERA total $12,840.45; EFT matched $12,840.45; $430 requires manual exception review.</div>
-            </div>
-            <div className="alert warn">
-              <strong>Unapplied balance</strong>
-              <div className="sub">PMT-9014 has $3,120.78 unapplied. Assign owner or resolve before close.</div>
+              <div className="sub">Import ERA files and run auto-post to see reconciliation status here.</div>
             </div>
           </div>
         )}

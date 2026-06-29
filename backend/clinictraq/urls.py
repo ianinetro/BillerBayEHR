@@ -14,9 +14,25 @@ API surface:
 
 from django.contrib import admin
 from django.urls import path, include
+from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
+from django.contrib.auth import logout
+from django.http import JsonResponse
+from django.views.decorators.http import require_POST
+from django.views.decorators.csrf import csrf_exempt
+
+@csrf_exempt
+@require_POST
+def logout_view(request):
+    logout(request)
+    return JsonResponse({"detail": "Logged out."})
 
 urlpatterns = [
     path("admin/", admin.site.urls),
+
+    # Auth endpoints
+    path("api/auth/token/", TokenObtainPairView.as_view(), name="token_obtain_pair"),
+    path("api/auth/token/refresh/", TokenRefreshView.as_view(), name="token_refresh"),
+    path("api/auth/logout/", logout_view, name="logout"),
 
     # Core clinical & financial APIs
     path("api/patients/", include("patients.urls")),

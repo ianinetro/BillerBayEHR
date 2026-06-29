@@ -1,20 +1,54 @@
 import React, { useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import Badge from '../components/Badge';
-import { getClaim } from '../api/claims';
+import { getClaim, validateClaim, submitClaim, updateClaim, generate837p } from '../api/claims';
+import { useToast } from '../components/Toast';
 
-const fmt = n => '$' + Number(n).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const fmt = n => '$' + Number(n || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const TABS = ['summary', 'patient', 'diagnosis', 'service lines', 'providers', 'validation', 'submission', 'payments', 'cms preview', 'activity'];
 
 export default function ClaimDetail() {
   const { id } = useParams();
   const navigate = useNavigate();
+  const qc = useQueryClient();
+  const toast = useToast();
   const [tab, setTab] = useState('summary');
+
   const { data: claim, isLoading } = useQuery({ queryKey: ['claim', id], queryFn: () => getClaim(id) });
 
-  if (isLoading) return <p className="muted">Loading…</p>;
-  if (!claim) return <p className="muted">Claim not found.</p>;
+  const validateMut = useMutation({
+    mutationFn: () => validateClaim(claim.id),
+    onSuccess: r => {
+      qc.invalidateQueries({ queryKey: ['claim', id] });
+      if (r.validation_status === 'Passed') toast.success('Validation passed — claim is ready to submit.');
+      else if (r.validation_status === 'Blocking') toast.error(`Validation failed: ${r.issues?.length || 0} blocking issue(s).`);
+      else toast.warn(`Validation warning: ${r.issues?.length || 0} issue(s).`);
+      setTab('validation');
+    },
+    onError: () => toast.error('Validation run failed.'),
+  });
+
+  const submitMut = useMutation({
+    mutationFn: () => submitClaim(claim.id),
+    onSuccess: r => { qc.invalidateQueries({ queryKey: ['claim', id] }); toast.success('Claim submitted successfully.'); setTab('submission'); },
+    onError: e => toast.error(e.response?.data?.detail || 'Submission failed.'),
+  });
+
+  const saveMut = useMutation({
+    mutationFn: data => updateClaim(claim.id, data),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['claim', id] }); toast.success('Claim saved.'); },
+    onError: () => toast.error('Save failed.'),
+  });
+
+  const ediMut = useMutation({
+    mutationFn: () => generate837p(claim.id),
+    onSuccess: r => { toast.success('837P generated. Check EDI output below.'); console.log(r.edi); },
+    onError: e => toast.warn(e.response?.data?.detail || '837P generation not available.'),
+  });
+
+  if (isLoading) return <p className="muted" style={{ padding: 24 }}>Loading…</p>;
+  if (!claim) return <p className="muted" style={{ padding: 24 }}>Claim not found.</p>;
 
   return (
     <div>
@@ -26,9 +60,18 @@ export default function ClaimDetail() {
           <div className="desc">Professional claim · {claim.patient_name || claim.patient} · {claim.payer}</div>
         </div>
         <div className="actions">
-          <button className="btn" onClick={() => alert('CMS-1500 preview generated.')}>Preview CMS-1500</button>
-          <button className="btn" onClick={() => alert('Claim submitted.')}>Submit claim</button>
-          <button className="btn primary" onClick={() => alert('Claim saved.')}>Save claim</button>
+          <button className="btn" onClick={() => ediMut.mutate()} disabled={ediMut.isPending}>
+            {ediMut.isPending ? 'Generating…' : 'Preview 837P'}
+          </button>
+          <button className="btn" disabled={validateMut.isPending} onClick={() => validateMut.mutate()}>
+            {validateMut.isPending ? 'Validating…' : 'Validate'}
+          </button>
+          <button className="btn" disabled={submitMut.isPending || claim.validation_status === 'Blocking'} onClick={() => submitMut.mutate()}>
+            {submitMut.isPending ? 'Submitting…' : 'Submit claim'}
+          </button>
+          <button className="btn primary" disabled={saveMut.isPending} onClick={() => saveMut.mutate({})}>
+            {saveMut.isPending ? 'Saving…' : 'Save claim'}
+          </button>
         </div>
       </div>
 
@@ -43,14 +86,14 @@ export default function ClaimDetail() {
         <div style={{ padding: 18 }}>
           {tab === 'summary' && <SummaryTab claim={claim} setTab={setTab} />}
           {tab === 'patient' && <PatientTab claim={claim} />}
-          {tab === 'diagnosis' && <DiagnosisTab />}
+          {tab === 'diagnosis' && <DiagnosisTab claim={claim} />}
           {tab === 'service lines' && <ServiceLinesTab claim={claim} />}
           {tab === 'providers' && <ProvidersTab claim={claim} />}
-          {tab === 'validation' && <ValidationTab claim={claim} />}
+          {tab === 'validation' && <ValidationTab claim={claim} onValidate={() => validateMut.mutate()} loading={validateMut.isPending} />}
           {tab === 'submission' && <SubmissionTab claim={claim} />}
-          {tab === 'payments' && <PaymentsTab />}
-          {tab === 'cms preview' && <CmsPreviewTab />}
-          {tab === 'activity' && <ActivityTab />}
+          {tab === 'payments' && <PaymentsStatic />}
+          {tab === 'cms preview' && <CmsPreviewTab claim={claim} />}
+          {tab === 'activity' && <ActivityStatic />}
         </div>
       </div>
     </div>
@@ -62,8 +105,8 @@ function SummaryTab({ claim, setTab }) {
     { label: 'Visit created', sub: claim.visit || '—', done: true },
     { label: 'Claim created', sub: claim.created_at?.slice(0, 10) || '—', done: true },
     { label: 'Validation', sub: claim.validation_status, done: claim.validation_status === 'Passed', bad: claim.validation_status === 'Blocking' },
-    { label: '837P submit', sub: claim.submission_status, done: false },
-    { label: '835/payment', sub: 'Pending', done: false },
+    { label: '837P submit', sub: claim.submission_status, done: claim.submission_status === 'Submitted' },
+    { label: '835/payment', sub: claim.paid > 0 ? 'Received' : 'Pending', done: claim.paid > 0 },
   ];
   return (
     <div className="grid" style={{ gridTemplateColumns: '1fr 360px', alignItems: 'start' }}>
@@ -82,22 +125,25 @@ function SummaryTab({ claim, setTab }) {
         <div className="fieldgrid">
           {[
             ['Claim status', claim.status], ['Claim type', 'Professional / 837P'],
-            ['Primary or secondary', 'Primary'], ['Patient', claim.patient_name || claim.patient],
-            ['Linked visit', claim.visit || '—'], ['Payer', claim.payer],
-            ['DOS', claim.date_of_service], ['Total charges', fmt(claim.charges)],
-            ['Paid amount', fmt(claim.paid)], ['Balance', fmt(claim.balance)],
+            ['Patient', claim.patient_name || claim.patient], ['Linked visit', claim.visit || '—'],
+            ['Payer', claim.payer], ['DOS', claim.date_of_service],
+            ['Total charges', fmt(claim.charges)], ['Paid amount', fmt(claim.paid)],
+            ['Balance', fmt(claim.balance)],
           ].map(([l, v]) => (
             <div key={l} className="field"><label>{l}</label><div className="value">{v}</div></div>
           ))}
         </div>
       </div>
       <div className="card pad">
-        <div className="sectionTitle">Blocking reason</div>
-        <div className="alert danger">
-          <strong>Missing insured relationship</strong>
-          <div className="sub">Claim cannot be submitted until subscriber relationship is set for {claim.payer}.</div>
-        </div>
-        <button className="btn primary" style={{ width: '100%', marginTop: 12 }} onClick={() => setTab('validation')}>Fix validation issue</button>
+        <div className="sectionTitle">Claim status</div>
+        {claim.validation_status === 'Blocking'
+          ? <div className="alert danger"><strong>Blocking validation errors</strong><div className="sub">Fix validation issues before submitting.</div></div>
+          : claim.validation_status === 'Passed'
+          ? <div className="alert info"><strong>Validation passed</strong><div className="sub">Claim is ready to submit.</div></div>
+          : <div className="alert warn"><strong>Validation not run</strong><div className="sub">Run validation before submitting.</div></div>}
+        <button className="btn primary" style={{ width: '100%', marginTop: 12 }} onClick={() => setTab('validation')}>
+          {claim.validation_status === 'Blocking' ? 'Fix validation issues' : 'Review validation'}
+        </button>
       </div>
     </div>
   );
@@ -105,11 +151,9 @@ function SummaryTab({ claim, setTab }) {
 
 function PatientTab({ claim }) {
   const fields = [
-    ['Patient', claim.patient_name || claim.patient], ['Patient ID', claim.patient],
-    ['Patient DOB', '03/14/1978'], ['Insured name', 'Maria Sanchez'],
-    ['Relationship to insured', 'Missing'], ['Subscriber ID', '1EG4-TE5-MK73'],
-    ['Primary payer', claim.payer], ['Payer ID', claim.payer_id_on_file || 'MEDICARE-AZ'],
-    ['Release of info', 'Yes'], ['Signature on file', 'Yes'],
+    ['Patient', claim.patient_name || claim.patient], ['Linked visit', claim.visit || '—'],
+    ['Primary payer', claim.payer], ['Payer ID on file', claim.payer_id_on_file || '—'],
+    ['Date of service', claim.date_of_service], ['Claim type', claim.claim_type || '837P'],
   ];
   return (
     <div className="fieldgrid">
@@ -120,19 +164,15 @@ function PatientTab({ claim }) {
   );
 }
 
-function DiagnosisTab() {
+function DiagnosisTab({ claim }) {
   return (
     <>
-      <div className="field">
-        <label>Diagnosis list</label>
-        <div className="value">
-          <span className="badge blueB">A M25.561</span> Right knee pain<br />
-          <span className="badge blueB">B M17.11</span> Unilateral primary osteoarthritis, right knee
-        </div>
-      </div>
-      <div className="alert info" style={{ marginTop: 14 }}>
-        <strong>Smart coding check</strong>
-        <div className="sub">RT modifier agrees with right-side diagnosis. Inactive ICDs and non-primary ICD rules checked before submission.</div>
+      <div className="sectionTitle">Diagnosis codes</div>
+      <div className="alert info"><strong>Smart coding check</strong><div className="sub">ICD validity, laterality, and active-code checks run during validation.</div></div>
+      <div style={{ marginTop: 14 }}>
+        {claim.visit
+          ? <p className="muted">Diagnosis codes are managed on the <strong>Visit</strong> record. Open the visit to add/edit/remove codes.</p>
+          : <p className="muted">No linked visit — add diagnosis codes via the Visit detail page.</p>}
       </div>
     </>
   );
@@ -141,16 +181,12 @@ function DiagnosisTab() {
 function ServiceLinesTab({ claim }) {
   return (
     <>
-      <table className="table">
-        <thead><tr><th>CPT</th><th>Description</th><th>Modifiers</th><th>DX pointers</th><th>Units</th><th className="right">Charge</th><th>Validation</th></tr></thead>
-        <tbody>
-          <tr><td>99214</td><td>Office/outpatient visit est</td><td>25</td><td>A,B</td><td>1</td><td className="right">$180.00</td><td><Badge status="Passed" /></td></tr>
-          <tr><td>20610</td><td>Arthrocentesis/injection major joint</td><td>RT</td><td>A,B</td><td>1</td><td className="right">$140.00</td><td><Badge status="Passed" /></td></tr>
-        </tbody>
-      </table>
-      <div className="actions" style={{ marginTop: 12 }}>
-        <button className="btn">Add service line</button>
-        <button className="btn">Run NCCI-style check</button>
+      <div className="sectionTitle">Service lines</div>
+      {claim.visit
+        ? <p className="muted">Service lines are managed on the <strong>Visit</strong> record. Open the visit to add/edit/remove lines.</p>
+        : <p className="muted">No linked visit — add service lines via the Visit detail page.</p>}
+      <div style={{ marginTop: 14 }}>
+        <div className="alert info"><strong>Auto-totalled</strong><div className="sub">Claim charges are recalculated from visit service lines when the claim is created or updated.</div></div>
       </div>
     </>
   );
@@ -158,11 +194,10 @@ function ServiceLinesTab({ claim }) {
 
 function ProvidersTab({ claim }) {
   const fields = [
-    ['Rendering provider', 'Dr. Harlan'], ['Rendering NPI', '1740283991'],
-    ['Billing provider', 'Apex Family Care LLC'], ['Billing NPI', '1234567893'],
-    ['Billing tax ID', '••-•••2388'], ['Facility', claim.facility],
-    ['Facility NPI', '1982773220'], ['POS', '11'],
-    ['Referring provider', 'Dr. Adams'], ['Prior auth', 'AUTH-2026-103'],
+    ['Rendering provider', claim.provider || '—'],
+    ['Facility', claim.facility || '—'],
+    ['Payer', claim.payer || '—'],
+    ['Payer ID on file', claim.payer_id_on_file || '—'],
   ];
   return (
     <div className="fieldgrid">
@@ -173,59 +208,63 @@ function ProvidersTab({ claim }) {
   );
 }
 
-function ValidationTab({ claim }) {
-  const [fixed, setFixed] = useState(false);
+function ValidationTab({ claim, onValidate, loading }) {
+  const issues = claim.validation_issues || [];
   return (
     <>
-      {!fixed
-        ? <div className="alert danger"><strong>Blocking error</strong><div className="sub">Missing insured relationship. Fix: choose Self, Spouse, Child, or Other.</div></div>
-        : <div className="alert info"><strong>Validation passed</strong><div className="sub">Relationship set to Self. Claim is ready to submit.</div></div>}
-      <div className="divider" />
-      <table className="table">
-        <thead><tr><th>Severity</th><th>Issue</th><th>Location</th><th>Why it matters</th><th>Fix</th></tr></thead>
-        <tbody>
-          <tr>
-            <td><Badge status={fixed ? 'Passed' : 'Blocking'} /></td>
-            <td>Missing insured relationship</td>
-            <td>Patient and insured</td>
-            <td>Required for 837P subscriber loop</td>
-            <td>
-              {!fixed
-                ? <button className="btn primary" onClick={() => setFixed(true)}>Set to Self</button>
-                : <span className="muted">Resolved</span>}
-            </td>
-          </tr>
-          <tr>
-            <td><Badge status="Warning" /></td>
-            <td>Deductible remaining</td>
-            <td>Insurance</td>
-            <td>Patient responsibility likely after adjudication</td>
-            <td><button className="btn">Acknowledge</button></td>
-          </tr>
-        </tbody>
-      </table>
+      {claim.validation_status === 'Passed' && <div className="alert info"><strong>Validation passed</strong><div className="sub">No blocking issues. Claim is ready to submit.</div></div>}
+      {claim.validation_status === 'Blocking' && <div className="alert danger"><strong>Blocking errors</strong><div className="sub">{issues.filter(i => i.severity === 'Blocking').length} blocking issue(s) must be resolved before submission.</div></div>}
+      {claim.validation_status === 'Needs run' && <div className="alert warn"><strong>Validation not run yet</strong><div className="sub">Click "Run validation" to check this claim.</div></div>}
+      <div style={{ marginTop: 14 }}>
+        <button className="btn primary" onClick={onValidate} disabled={loading}>{loading ? 'Running…' : 'Run validation'}</button>
+      </div>
+      {issues.length > 0 && (
+        <>
+          <div className="divider" />
+          <table className="table">
+            <thead><tr><th>Severity</th><th>Issue</th><th>Location</th><th>Why it matters</th></tr></thead>
+            <tbody>
+              {issues.map((iss, i) => (
+                <tr key={iss.id || i}>
+                  <td><Badge status={iss.severity} /></td>
+                  <td>{iss.issue}</td>
+                  <td>{iss.location}</td>
+                  <td>{iss.why_it_matters}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </>
+      )}
     </>
   );
 }
 
 function SubmissionTab({ claim }) {
+  const history = claim.submission_history || [];
   return (
     <div className="grid" style={{ gridTemplateColumns: '1fr 1fr' }}>
       <div className="card pad">
         <div className="sectionTitle">Submission history</div>
-        <div className="timeline">
-          <div className="event"><div className="dot" /><div><strong>Claim created</strong><span>Lina · {claim.created_at?.slice(0, 10)}</span></div></div>
-          <div className="event"><div className="dot" /><div><strong>Validation run</strong><span>System · missing insured relationship.</span></div></div>
-        </div>
+        {history.length === 0
+          ? <p className="muted">No submission history yet.</p>
+          : <div className="timeline">
+              {history.map((h, i) => (
+                <div key={h.id || i} className="event">
+                  <div className="dot" />
+                  <div><strong>{h.submission_type || 'Submission'}</strong><span>{h.submitted_at?.slice(0, 10)} · {h.status}</span></div>
+                </div>
+              ))}
+            </div>}
       </div>
       <div className="card pad">
         <div className="sectionTitle">EDI transactions</div>
         <table className="table">
-          <thead><tr><th>Type</th><th>Status</th><th>Control</th></tr></thead>
+          <thead><tr><th>Type</th><th>Status</th></tr></thead>
           <tbody>
-            <tr><td>837P</td><td><Badge status="Draft" /></td><td>—</td></tr>
-            <tr><td>999</td><td><Badge status="Not submitted" /></td><td>—</td></tr>
-            <tr><td>277CA</td><td><Badge status="Not submitted" /></td><td>—</td></tr>
+            <tr><td>837P</td><td><Badge status={claim.submission_status || 'Not submitted'} /></td></tr>
+            <tr><td>999/Acknowledgment</td><td><Badge status="Pending" /></td></tr>
+            <tr><td>277CA</td><td><Badge status="Pending" /></td></tr>
           </tbody>
         </table>
       </div>
@@ -233,26 +272,29 @@ function SubmissionTab({ claim }) {
   );
 }
 
-function PaymentsTab() {
+function PaymentsStatic() {
   return (
     <table className="table">
       <thead><tr><th>Payment</th><th>Source</th><th>Status</th><th className="right">Applied</th></tr></thead>
-      <tbody><tr><td className="mono">PMT-9013</td><td>Manual</td><td><Badge status="Reconciled" /></td><td className="right">$50.00</td></tr></tbody>
+      <tbody><tr><td colSpan={4} className="muted" style={{ textAlign: 'center', padding: 16 }}>Payment history available in Payments module.</td></tr></tbody>
     </table>
   );
 }
 
-function CmsPreviewTab() {
+function CmsPreviewTab({ claim }) {
   return (
     <>
       <div className="alert info"><strong>CMS-1500 02/12 preview</strong><div className="sub">This preview is for review/print/download. Editing stays in operational sections above.</div></div>
       <div className="card pad" style={{ marginTop: 14, background: '#fafafa' }}>
         <div style={{ border: '2px solid #999', padding: 20, minHeight: 300, background: 'white' }}>
-          <strong>CMS-1500 Preview</strong>
+          <strong>CMS-1500 Preview — {claim.claim_id}</strong>
           <div className="fieldgrid" style={{ marginTop: 14 }}>
-            <div className="fakeinput">1a Insured ID: 1EG4-TE5-MK73</div>
-            <div className="fakeinput">21 Diagnosis: M25.561, M17.11</div>
-            <div className="fakeinput">24D Procedures: 99214-25, 20610-RT</div>
+            <div className="fakeinput">Patient: {claim.patient_name || claim.patient}</div>
+            <div className="fakeinput">Payer: {claim.payer} ({claim.payer_id_on_file})</div>
+            <div className="fakeinput">DOS: {claim.date_of_service}</div>
+            <div className="fakeinput">Total charges: {fmt(claim.charges)}</div>
+            <div className="fakeinput">Provider: {claim.provider}</div>
+            <div className="fakeinput">Facility: {claim.facility}</div>
           </div>
         </div>
       </div>
@@ -260,15 +302,10 @@ function CmsPreviewTab() {
   );
 }
 
-function ActivityTab() {
+function ActivityStatic() {
   return (
     <div className="timeline">
-      {[['Claim created', 'Lina · from V-20491.'],
-        ['Validation run', 'System · missing insured relationship.'],
-        ['Payment posted', 'PMT-9013 card $50.00 applied.'],
-        ['Audit log', 'Admin · claim viewed.']].map(([t, d], i) => (
-        <div key={i} className="event"><div className="dot" /><div><strong>{t}</strong><br /><span>{d}</span></div></div>
-      ))}
+      <div className="event"><div className="dot" /><div><strong>Claim created</strong><span>Full activity log available in Audit module.</span></div></div>
     </div>
   );
 }

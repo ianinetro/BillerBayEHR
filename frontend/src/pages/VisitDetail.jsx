@@ -1,20 +1,38 @@
 import React, { useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import Badge from '../components/Badge';
-import { getVisit } from '../api/visits';
+import Modal from '../components/Modal';
+import { getVisit, listDiagnosisLines, createDiagnosisLine, deleteDiagnosisLine, listServiceLines, createServiceLine, deleteServiceLine } from '../api/visits';
+import { createClaim, validateClaim } from '../api/claims';
+import { useToast } from '../components/Toast';
 
-const fmt = n => '$' + Number(n).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const fmt = n => '$' + Number(n || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const TABS = ['info', 'billing', 'options', 'claim', 'payments', 'activity'];
 
 export default function VisitDetail() {
   const { id } = useParams();
   const navigate = useNavigate();
+  const qc = useQueryClient();
+  const toast = useToast();
   const [tab, setTab] = useState('info');
+
   const { data: visit, isLoading } = useQuery({ queryKey: ['visit', id], queryFn: () => getVisit(id) });
 
-  if (isLoading) return <p className="muted">Loading…</p>;
-  if (!visit) return <p className="muted">Visit not found.</p>;
+  const claimMut = useMutation({
+    mutationFn: () => createClaim({ visit: visit.id }),
+    onSuccess: c => { qc.invalidateQueries({ queryKey: ['visit', id] }); toast.success('Claim created.'); navigate(`/claims/${c.claim_id}`); },
+    onError: () => toast.error('Could not create claim. Ensure diagnosis codes and service lines are added.'),
+  });
+
+  const validateMut = useMutation({
+    mutationFn: () => validateClaim(visit.linked_claim),
+    onSuccess: r => { toast.info(`Validation: ${r.validation_status}. ${r.issues?.length || 0} issue(s).`); },
+    onError: () => toast.error('Validation failed — no linked claim found.'),
+  });
+
+  if (isLoading) return <p className="muted" style={{ padding: 24 }}>Loading…</p>;
+  if (!visit) return <p className="muted" style={{ padding: 24 }}>Visit not found.</p>;
 
   return (
     <div>
@@ -26,8 +44,16 @@ export default function VisitDetail() {
           <div className="desc">DOS {visit.date_of_service} · {visit.visit_type} · {visit.provider}</div>
         </div>
         <div className="actions">
-          <button className="btn" onClick={() => alert('Billing information validated.')}>Validate billing info</button>
-          <button className="btn primary" onClick={() => { alert('Claim draft created.'); navigate('/claims'); }}>Create claim</button>
+          {visit.linked_claim
+            ? <button className="btn" disabled={validateMut.isPending} onClick={() => validateMut.mutate()}>
+                {validateMut.isPending ? 'Validating…' : 'Validate claim'}
+              </button>
+            : null}
+          {!visit.linked_claim
+            ? <button className="btn primary" disabled={claimMut.isPending} onClick={() => claimMut.mutate()}>
+                {claimMut.isPending ? 'Creating…' : 'Create claim'}
+              </button>
+            : <button className="btn primary" onClick={() => navigate(`/claims/${visit.linked_claim}`)}>Open claim</button>}
         </div>
       </div>
 
@@ -42,17 +68,17 @@ export default function VisitDetail() {
           </div>
           <div style={{ padding: 18 }}>
             {tab === 'info' && <InfoTab visit={visit} />}
-            {tab === 'billing' && <BillingTab visit={visit} />}
-            {tab === 'options' && <OptionsTab />}
+            {tab === 'billing' && <BillingTab visit={visit} toast={toast} qc={qc} />}
+            {tab === 'options' && <OptionsTab visit={visit} />}
             {tab === 'claim' && <ClaimTab visit={visit} navigate={navigate} />}
-            {tab === 'payments' && <PaymentsTab />}
-            {tab === 'activity' && <ActivityTab />}
+            {tab === 'payments' && <PaymentsStatic />}
+            {tab === 'activity' && <ActivityStatic />}
           </div>
         </div>
 
         <div className="card pad summary">
           <div className="sectionTitle">Visit summary</div>
-          <div className="statusline"><Badge status={visit.status} /><Badge status={visit.facility} /></div>
+          <div className="statusline"><Badge status={visit.status} />{visit.facility && <Badge status={visit.facility} />}</div>
           <div className="divider" />
           <div className="field"><label>Charges</label><div className="value right"><strong>{fmt(visit.charges)}</strong></div></div>
           <div className="field"><label>Balance</label><div className="value right"><strong>{fmt(visit.balance)}</strong></div></div>
@@ -68,58 +94,122 @@ export default function VisitDetail() {
 function InfoTab({ visit }) {
   const fields = [
     ['Patient', visit.patient_name || visit.patient], ['Visit date', visit.date_of_service],
-    ['Visit type', visit.visit_type], ['Reason', visit.reason],
-    ['Chief complaint', visit.chief_complaint || 'Right knee pain'], ['Allergies', visit.allergies || 'NKDA'],
-    ['Blood pressure', visit.blood_pressure || '—'], ['Weight', visit.weight || '—'],
-    ['Provider', visit.provider], ['Facility', visit.facility],
-    ['Status', visit.status], ['Provider notes', visit.provider_notes || '—'],
+    ['Visit type', visit.visit_type || '—'], ['Reason', visit.reason || '—'],
+    ['Provider', visit.provider || '—'], ['Facility', visit.facility || '—'],
+    ['Status', visit.status],
   ];
   return (
     <div className="fieldgrid">
       {fields.map(([l, v]) => (
-        <div key={l} className="field"><label>{l}</label><input className="input" defaultValue={v} style={{ width: '100%' }} /></div>
+        <div key={l} className="field"><label>{l}</label><input className="input" defaultValue={v} style={{ width: '100%' }} readOnly /></div>
       ))}
     </div>
   );
 }
 
-function BillingTab({ visit }) {
+function BillingTab({ visit, toast, qc }) {
+  const [showAddDx, setShowAddDx] = useState(false);
+  const [dxForm, setDxForm] = useState({ icd_code: '', description: '', pointer: 'A' });
+  const [showAddSvc, setShowAddSvc] = useState(false);
+  const [svcForm, setSvcForm] = useState({ cpt_code: '', modifiers: '', charge: '', units: '1' });
+
+  const { data: dxData } = useQuery({ queryKey: ['visit-dx', visit.id], queryFn: () => listDiagnosisLines(visit.id) });
+  const dxLines = dxData?.results || (Array.isArray(dxData) ? dxData : []);
+
+  const { data: svcData } = useQuery({ queryKey: ['visit-svc', visit.id], queryFn: () => listServiceLines(visit.id) });
+  const svcLines = svcData?.results || (Array.isArray(svcData) ? svcData : []);
+
+  const addDxMut = useMutation({
+    mutationFn: () => createDiagnosisLine(visit.id, dxForm),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['visit-dx', visit.id] }); setShowAddDx(false); toast.success('Diagnosis added.'); },
+    onError: () => toast.error('Failed to add diagnosis.'),
+  });
+
+  const deleteDxMut = useMutation({
+    mutationFn: dxId => deleteDiagnosisLine(visit.id, dxId),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['visit-dx', visit.id] }); toast.success('Diagnosis removed.'); },
+  });
+
+  const addSvcMut = useMutation({
+    mutationFn: () => createServiceLine(visit.id, { ...svcForm, charge: Number(svcForm.charge), units: Number(svcForm.units) }),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['visit-svc', visit.id] }); setShowAddSvc(false); toast.success('Service line added.'); },
+    onError: () => toast.error('Failed to add service line.'),
+  });
+
+  const deleteSvcMut = useMutation({
+    mutationFn: svcId => deleteServiceLine(visit.id, svcId),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['visit-svc', visit.id] }); toast.success('Service line removed.'); },
+  });
+
   return (
     <>
-      <div className="alert warn"><strong>Line-level coding checks active</strong><div className="sub">Diagnosis pointers, modifier conflicts, inactive CPT/DX, NCCI-style edits run before claim creation.</div></div>
+      <div className="alert warn"><strong>Line-level coding checks active</strong><div className="sub">Modifier conflicts, inactive CPT/DX, and coding checks run before claim creation.</div></div>
       <div className="divider" />
-      <div className="field">
-        <label>Diagnosis codes A–L</label>
-        <div className="value">
-          <span className="badge blueB">A M25.561 Right knee pain</span>{' '}
-          <span className="badge blueB">B M17.11 Unilateral primary osteoarthritis, right knee</span>{' '}
-          <button className="btn">Add diagnosis</button>
+
+      <div className="toolbar" style={{ marginBottom: 8 }}>
+        <strong>Diagnosis codes</strong>
+        <button className="btn sm" onClick={() => setShowAddDx(true)}>+ Add diagnosis</button>
+      </div>
+      {dxLines.length === 0
+        ? <p className="muted">No diagnosis codes. Add at least one before creating a claim.</p>
+        : <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginBottom: 14 }}>
+            {dxLines.map((dx, i) => (
+              <span key={dx.id} style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                <span className="badge blueB">{String.fromCharCode(65 + i)} {dx.icd_code}</span>
+                <span style={{ fontSize: 12, color: 'var(--slate)' }}>{dx.description}</span>
+                <button className="btn sm danger" onClick={() => deleteDxMut.mutate(dx.id)}>×</button>
+              </span>
+            ))}
+          </div>}
+
+      <div className="divider" />
+      <div className="toolbar" style={{ marginBottom: 8 }}>
+        <strong>Service lines</strong>
+        <button className="btn sm" onClick={() => setShowAddSvc(true)}>+ Add service line</button>
+      </div>
+      {svcLines.length === 0
+        ? <p className="muted">No service lines. Add CPT codes before creating a claim.</p>
+        : <table className="table">
+            <thead><tr><th>CPT</th><th>Modifiers</th><th>Units</th><th className="right">Charge</th><th></th></tr></thead>
+            <tbody>
+              {svcLines.map(s => (
+                <tr key={s.id}>
+                  <td>{s.cpt_code}</td><td>{s.modifiers || '—'}</td><td>{s.units}</td>
+                  <td className="right">{fmt(s.charge)}</td>
+                  <td><button className="btn sm danger" onClick={() => deleteSvcMut.mutate(s.id)}>Remove</button></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>}
+
+      <Modal open={showAddDx} title="Add diagnosis code" onClose={() => setShowAddDx(false)}
+        footer={<><button className="btn ghost" onClick={() => setShowAddDx(false)}>Cancel</button><button className="btn primary" onClick={() => addDxMut.mutate()} disabled={addDxMut.isPending}>{addDxMut.isPending ? 'Adding…' : 'Add'}</button></>}>
+        <div className="field"><label>ICD-10 code *</label><input className="input" style={{ width: '100%' }} value={dxForm.icd_code} onChange={e => setDxForm(f => ({ ...f, icd_code: e.target.value }))} placeholder="M25.561" autoFocus /></div>
+        <div className="field"><label>Description</label><input className="input" style={{ width: '100%' }} value={dxForm.description} onChange={e => setDxForm(f => ({ ...f, description: e.target.value }))} placeholder="Right knee pain" /></div>
+      </Modal>
+
+      <Modal open={showAddSvc} title="Add service line" onClose={() => setShowAddSvc(false)}
+        footer={<><button className="btn ghost" onClick={() => setShowAddSvc(false)}>Cancel</button><button className="btn primary" onClick={() => addSvcMut.mutate()} disabled={addSvcMut.isPending}>{addSvcMut.isPending ? 'Adding…' : 'Add'}</button></>}>
+        <div className="form-row">
+          <div className="field"><label>CPT/HCPCS *</label><input className="input" value={svcForm.cpt_code} onChange={e => setSvcForm(f => ({ ...f, cpt_code: e.target.value }))} placeholder="99214" autoFocus /></div>
+          <div className="field"><label>Modifiers</label><input className="input" value={svcForm.modifiers} onChange={e => setSvcForm(f => ({ ...f, modifiers: e.target.value }))} placeholder="25 RT" /></div>
         </div>
-      </div>
-      <div className="divider" />
-      <table className="table">
-        <thead><tr><th>From DOS</th><th>To DOS</th><th>POS</th><th>CPT</th><th>Modifiers</th><th>DX pointer</th><th className="right">Charge</th><th>Units</th></tr></thead>
-        <tbody>
-          <tr><td>{visit.date_of_service}</td><td>{visit.date_of_service}</td><td>11</td><td>99214</td><td>25</td><td>A,B</td><td className="right">$180.00</td><td>1</td></tr>
-          <tr><td>{visit.date_of_service}</td><td>{visit.date_of_service}</td><td>11</td><td>20610</td><td>RT</td><td>A,B</td><td className="right">$140.00</td><td>1</td></tr>
-        </tbody>
-      </table>
-      <div className="actions" style={{ marginTop: 12 }}>
-        <button className="btn">Add line item</button>
-        <button className="btn primary" onClick={() => alert('Charge lines saved.')}>Save billing info</button>
-      </div>
+        <div className="form-row">
+          <div className="field"><label>Charge ($) *</label><input className="input" type="number" min="0" step="0.01" value={svcForm.charge} onChange={e => setSvcForm(f => ({ ...f, charge: e.target.value }))} placeholder="180.00" /></div>
+          <div className="field"><label>Units</label><input className="input" type="number" min="1" value={svcForm.units} onChange={e => setSvcForm(f => ({ ...f, units: e.target.value }))} /></div>
+        </div>
+      </Modal>
     </>
   );
 }
 
-function OptionsTab() {
+function OptionsTab({ visit }) {
   const fields = [
-    ['Referring physician', 'Dr. Adams'], ['Supervising physician', 'Dr. Harlan'],
-    ['Billing provider', 'Apex Family Care LLC'], ['Billing NPI', '1234567893'],
-    ['Rendering provider', 'Dr. Harlan'], ['POS', '11'],
-    ['Employment-related', 'No'], ['Onset date', '06/01/2026'],
-    ['Prior authorization', 'AUTH-2026-103'], ['CLIA', '03D1234567'],
-    ['Date last seen', '06/24/2026'], ['Original reference number', '—'],
+    ['Referring physician', visit.referring_provider || '—'],
+    ['Billing provider', visit.billing_provider || '—'],
+    ['Rendering provider', visit.provider || '—'],
+    ['POS', visit.pos || '11'],
+    ['Prior authorization', visit.prior_auth || '—'],
   ];
   return (
     <div className="fieldgrid">
@@ -135,35 +225,30 @@ function ClaimTab({ visit, navigate }) {
     <>
       <div className="alert info">
         <strong>Linked claim</strong>
-        <div className="sub">{visit.linked_claim ? `This visit created claim ${visit.linked_claim}.` : 'No claim created yet.'}</div>
+        <div className="sub">{visit.linked_claim ? `This visit created claim ${visit.linked_claim}.` : 'No claim created yet. Add diagnosis codes and service lines, then click "Create claim".'}</div>
       </div>
       {visit.linked_claim && (
         <div className="actions" style={{ marginTop: 14 }}>
           <button className="btn primary" onClick={() => navigate(`/claims/${visit.linked_claim}`)}>Open claim</button>
-          <button className="btn">Print billing statement</button>
         </div>
       )}
     </>
   );
 }
 
-function PaymentsTab() {
+function PaymentsStatic() {
   return (
     <table className="table">
       <thead><tr><th>Payment</th><th>Source</th><th>Status</th><th className="right">Applied</th></tr></thead>
-      <tbody><tr><td className="mono">PMT-9013</td><td>Manual</td><td><Badge status="Reconciled" /></td><td className="right">$50.00</td></tr></tbody>
+      <tbody><tr><td colSpan={4} className="muted" style={{ textAlign: 'center', padding: 16 }}>Payment history available in Payments module.</td></tr></tbody>
     </table>
   );
 }
 
-function ActivityTab() {
+function ActivityStatic() {
   return (
     <div className="timeline">
-      {[['Claim created', 'Lina · BB-2026-000183 created from this visit.'],
-        ['Billing info saved', 'System · charge lines and diagnosis codes saved.'],
-        ['Payment posted', 'PMT-9013 card $50.00 applied.']].map(([t, d], i) => (
-        <div key={i} className="event"><div className="dot" /><div><strong>{t}</strong><br /><span>{d}</span></div></div>
-      ))}
+      <div className="event"><div className="dot" /><div><strong>Visit created</strong><span>Activity logged in Audit module.</span></div></div>
     </div>
   );
 }

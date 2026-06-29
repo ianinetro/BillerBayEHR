@@ -96,6 +96,19 @@ class ClaimViewSet(viewsets.ModelViewSet):
                 )
             )
 
+        # --- Smart billing rules (Phase 14) ---
+        from .billing_rules import run_smart_rules
+        for severity, issue_text, location, why in run_smart_rules(claim):
+            issues.append(
+                ClaimValidationIssue(
+                    claim=claim,
+                    severity=severity,
+                    issue=issue_text,
+                    location=location,
+                    why_it_matters=why,
+                )
+            )
+
         ClaimValidationIssue.objects.bulk_create(issues)
 
         has_blocking = any(i.severity == ClaimValidationIssue.Severity.BLOCKING for i in issues)
@@ -169,3 +182,27 @@ class ClaimViewSet(viewsets.ModelViewSet):
                 "history_id": history.pk,
             }
         )
+
+    @action(detail=True, methods=["post"], url_path="generate-837p")
+    def generate_837p(self, request, pk=None):
+        """Generate an 837P EDI string for this claim."""
+        claim = self.get_object()
+        try:
+            from edi.builders.x12_837p_builder import build_837p
+            edi_string = build_837p(claim)
+            return Response({"claim_id": claim.claim_id, "edi": edi_string})
+        except ImportError:
+            return Response(
+                {"detail": "EDI builder module not yet installed. Install pyx12 to enable."},
+                status=status.HTTP_501_NOT_IMPLEMENTED,
+            )
+
+    @action(detail=False, methods=["post"], url_path="batch-submit")
+    def batch_submit(self, request):
+        """Enqueue a batch of claims for async submission via Celery."""
+        claim_ids = request.data.get("claim_ids", [])
+        if not claim_ids:
+            return Response({"detail": "claim_ids list is required."}, status=status.HTTP_400_BAD_REQUEST)
+        from claims.tasks import batch_submit_claims
+        task = batch_submit_claims.delay(claim_ids)
+        return Response({"task_id": task.id, "queued": len(claim_ids)}, status=status.HTTP_202_ACCEPTED)

@@ -1,8 +1,5 @@
-version: "3.9"
-
 # Frontend is served by Cloudflare Pages.
-# This compose file runs: PostgreSQL + Django API + nginx (port 80).
-# Cloudflare proxied A record → Ubuntu:80 → nginx → Django:8000
+# This compose file runs: PostgreSQL + Redis + Django API (gunicorn) + Celery worker + nginx.
 
 services:
   db:
@@ -20,13 +17,38 @@ services:
       timeout: 5s
       retries: 10
 
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
   backend:
     build: ./backend
-    command: sh -c "python manage.py migrate && python manage.py runserver 0.0.0.0:8000"
+    command: sh -c "python manage.py migrate && gunicorn clinictraq.wsgi:application --bind 0.0.0.0:8000 --workers 4 --timeout 120"
     env_file:
       - ./backend/.env
     depends_on:
       db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./backend:/app
+    restart: unless-stopped
+
+  worker:
+    build: ./backend
+    command: celery -A clinictraq worker -l info --concurrency 4
+    env_file:
+      - ./backend/.env
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
         condition: service_healthy
     volumes:
       - ./backend:/app

@@ -1,7 +1,9 @@
 from rest_framework import viewsets, filters, status
-from rest_framework.decorators import action
+from rest_framework.decorators import action, api_view, parser_classes
+from rest_framework.parsers import MultiPartParser
 from rest_framework.response import Response
 from django_filters.rest_framework import DjangoFilterBackend
+from django.utils import timezone
 from .models import Payment, PaymentApplication, ERAException
 from .serializers import PaymentSerializer, PaymentApplicationSerializer, ERAExceptionSerializer
 
@@ -145,4 +147,33 @@ class PaymentViewSet(viewsets.ModelViewSet):
                 "application_id": app.pk,
                 "exception_resolved": True,
             }
+        )
+
+    @action(detail=False, methods=["post"], url_path="import-era", parser_classes=[MultiPartParser])
+    def import_era(self, request):
+        """
+        Accept an 835 ERA file upload, create a Payment record, and trigger async processing.
+        """
+        era_file = request.FILES.get("file")
+        if not era_file:
+            return Response({"detail": "No file uploaded."}, status=status.HTTP_400_BAD_REQUEST)
+
+        file_content = era_file.read().decode("utf-8", errors="replace")
+        payment = Payment.objects.create(
+            payment_date=timezone.now().date(),
+            payer_type=Payment.PayerType.INSURANCE,
+            payer_name="ERA Import",
+            method=Payment.Method.EFT,
+            amount=0,
+            source=Payment.Source.ERA,
+            era_file=era_file.name,
+            status=Payment.Status.DRAFT,
+        )
+
+        from payments.tasks import process_era_file
+        process_era_file.delay(payment.pk, file_content)
+
+        return Response(
+            {"detail": "ERA file received. Processing in background.", "payment_id": payment.payment_id},
+            status=status.HTTP_202_ACCEPTED,
         )
