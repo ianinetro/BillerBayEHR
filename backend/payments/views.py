@@ -1,3 +1,4 @@
+import zipfile
 from decimal import Decimal
 
 from django.db.models import Count, Q, Sum
@@ -175,7 +176,7 @@ class PaymentViewSet(viewsets.ModelViewSet):
             try:
                 file_content = extract_835_from_zip(raw_bytes)
                 filename = filename.rsplit(".", 1)[0] + ".835"
-            except ValueError as e:
+            except (ValueError, zipfile.BadZipFile) as e:
                 return Response(
                     {"detail": f"ZIP extraction failed: {e}"},
                     status=status.HTTP_400_BAD_REQUEST,

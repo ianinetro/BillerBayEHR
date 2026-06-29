@@ -1,4 +1,9 @@
+import logging
+
 from celery import shared_task
+from celery.exceptions import MaxRetriesExceededError
+
+logger = logging.getLogger(__name__)
 
 
 @shared_task(bind=True, max_retries=3)
@@ -66,5 +71,16 @@ def process_era_file(self, payment_id: int, file_content: str) -> None:
         payment.source = Payment.Source.ERA
         payment.save(update_fields=["status", "source"])
 
+        logger.info("process_era_file completed for payment_id=%s: %d claim rows", payment_id, len(parsed["claims"]))
+
+    except MaxRetriesExceededError:
+        logger.error("process_era_file exceeded max retries for payment_id=%s — marking failed", payment_id)
+        try:
+            from payments.models import Payment
+            Payment.objects.filter(pk=payment_id).update(status="Failed")
+        except Exception:
+            pass
+
     except Exception as exc:
+        logger.exception("process_era_file failed for payment_id=%s (attempt %d): %s", payment_id, self.request.retries + 1, exc)
         raise self.retry(exc=exc, countdown=60)
