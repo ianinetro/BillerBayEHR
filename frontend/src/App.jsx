@@ -3,6 +3,7 @@ import { Routes, Route, Navigate } from 'react-router-dom';
 import Layout from './components/Layout.jsx';
 import { ToastProvider } from './components/Toast.jsx';
 
+const Login       = lazy(() => import('./pages/Login.jsx'));
 const Dashboard   = lazy(() => import('./pages/Dashboard.jsx'));
 const Patients    = lazy(() => import('./pages/Patients.jsx'));
 const PatientDetail = lazy(() => import('./pages/PatientDetail.jsx'));
@@ -16,10 +17,22 @@ const Settings    = lazy(() => import('./pages/Settings.jsx'));
 const Audit       = lazy(() => import('./pages/Audit.jsx'));
 
 function PageFallback() {
+  return <div style={{ padding: '48px 32px', color: 'var(--slate)' }}>Loading…</div>;
+}
+
+function RequireAuth({ children }) {
+  const token = localStorage.getItem('ct_access_token');
+  if (!token) return <Navigate to="/login" replace />;
+  return children;
+}
+
+function S(Component) {
   return (
-    <div style={{ padding: '48px 32px', color: 'var(--slate)' }}>
-      Loading…
-    </div>
+    <RequireAuth>
+      <Suspense fallback={<PageFallback />}>
+        <Component />
+      </Suspense>
+    </RequireAuth>
   );
 }
 
@@ -27,40 +40,23 @@ export default function App() {
   return (
     <ToastProvider>
       <Routes>
-        <Route path="/" element={<Layout />}>
-          <Route index element={
-            <Suspense fallback={<PageFallback />}><Dashboard /></Suspense>
-          } />
-          <Route path="patients" element={
-            <Suspense fallback={<PageFallback />}><Patients /></Suspense>
-          } />
-          <Route path="patients/:id" element={
-            <Suspense fallback={<PageFallback />}><PatientDetail /></Suspense>
-          } />
-          <Route path="visits" element={
-            <Suspense fallback={<PageFallback />}><Visits /></Suspense>
-          } />
-          <Route path="visits/:id" element={
-            <Suspense fallback={<PageFallback />}><VisitDetail /></Suspense>
-          } />
-          <Route path="claims" element={
-            <Suspense fallback={<PageFallback />}><Claims /></Suspense>
-          } />
-          <Route path="claims/:id" element={
-            <Suspense fallback={<PageFallback />}><ClaimDetail /></Suspense>
-          } />
-          <Route path="billing" element={
-            <Suspense fallback={<PageFallback />}><Billing /></Suspense>
-          } />
-          <Route path="payments" element={
-            <Suspense fallback={<PageFallback />}><Payments /></Suspense>
-          } />
-          <Route path="settings" element={
-            <Suspense fallback={<PageFallback />}><Settings /></Suspense>
-          } />
-          <Route path="audit" element={
-            <Suspense fallback={<PageFallback />}><Audit /></Suspense>
-          } />
+        <Route path="/login" element={
+          <Suspense fallback={<PageFallback />}><Login /></Suspense>
+        } />
+        <Route path="/" element={
+          <RequireAuth><Layout /></RequireAuth>
+        }>
+          <Route index element={S(Dashboard)} />
+          <Route path="patients" element={S(Patients)} />
+          <Route path="patients/:id" element={S(PatientDetail)} />
+          <Route path="visits" element={S(Visits)} />
+          <Route path="visits/:id" element={S(VisitDetail)} />
+          <Route path="claims" element={S(Claims)} />
+          <Route path="claims/:id" element={S(ClaimDetail)} />
+          <Route path="billing" element={S(Billing)} />
+          <Route path="payments" element={S(Payments)} />
+          <Route path="settings" element={S(Settings)} />
+          <Route path="audit" element={S(Audit)} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Route>
       </Routes>

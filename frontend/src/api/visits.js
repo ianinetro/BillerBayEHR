@@ -1,34 +1,51 @@
 import client from './client.js';
 
-/**
- * List visits with optional filters/pagination.
- * @param {object} params - query params (patient_id, date_from, date_to, status, page, …)
- */
 export function listVisits(params = {}) {
   return client.get('/visits/', { params }).then(r => r.data);
 }
 
-/**
- * Get a single visit by ID.
- * @param {string|number} id
- */
 export function getVisit(id) {
   return client.get(`/visits/${id}/`).then(r => r.data);
 }
 
-/**
- * Create a new visit.
- * @param {object} data - visit fields (patient, provider, date_of_service, …)
- */
 export function createVisit(data) {
   return client.post('/visits/', data).then(r => r.data);
 }
 
-/**
- * Update a visit.
- * @param {string|number} id
- * @param {object} data - partial or full visit fields
- */
 export function updateVisit(id, data) {
   return client.patch(`/visits/${id}/`, data).then(r => r.data);
+}
+
+// Nested: diagnosis lines
+export function listDiagnosisLines(visitPk) {
+  return client.get(`/visits/${visitPk}/diagnoses/`).then(r => r.data);
+}
+
+export function createDiagnosisLine(visitPk, data) {
+  return client.post(`/visits/${visitPk}/diagnoses/`, data).then(r => r.data);
+}
+
+export function updateDiagnosisLine(visitPk, id, data) {
+  return client.patch(`/visits/${visitPk}/diagnoses/${id}/`, data).then(r => r.data);
+}
+
+export function deleteDiagnosisLine(visitPk, id) {
+  return client.delete(`/visits/${visitPk}/diagnoses/${id}/`);
+}
+
+// Nested: service lines
+export function listServiceLines(visitPk) {
+  return client.get(`/visits/${visitPk}/service-lines/`).then(r => r.data);
+}
+
+export function createServiceLine(visitPk, data) {
+  return client.post(`/visits/${visitPk}/service-lines/`, data).then(r => r.data);
+}
+
+export function updateServiceLine(visitPk, id, data) {
+  return client.patch(`/visits/${visitPk}/service-lines/${id}/`, data).then(r => r.data);
+}
+
+export function deleteServiceLine(visitPk, id) {
+  return client.delete(`/visits/${visitPk}/service-lines/${id}/`);
 }
