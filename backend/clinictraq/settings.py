@@ -128,10 +128,17 @@ MEDIA_ROOT = BASE_DIR / "media"
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 # ---------------------------------------------------------------------------
-# CORS — allow all origins in development
+# CORS — allow all in dev; lock to Pages domain in production via env var
+# Set CORS_ALLOWED_ORIGINS=https://clinictraq.billerbay.net in production .env
 # ---------------------------------------------------------------------------
 
-CORS_ALLOW_ALL_ORIGINS = True
+_cors_origins = os.environ.get("CORS_ALLOWED_ORIGINS", "")
+if _cors_origins:
+    CORS_ALLOW_ALL_ORIGINS = False
+    CORS_ALLOWED_ORIGINS = [o.strip() for o in _cors_origins.split(",") if o.strip()]
+else:
+    CORS_ALLOW_ALL_ORIGINS = True
+
 CORS_ALLOW_CREDENTIALS = True
 
 # ---------------------------------------------------------------------------

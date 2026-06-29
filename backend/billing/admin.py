@@ -1,10 +1,12 @@
 from django.contrib import admin
-from .models import WorkQueueItem
+from . import models as m
 
-
-@admin.register(WorkQueueItem)
-class WorkQueueItemAdmin(admin.ModelAdmin):
-    list_display = ("id", "queue_type", "priority", "status", "patient", "claim", "assigned_to", "due_date", "created_at")
-    list_filter = ("queue_type", "priority", "status")
-    search_fields = ("patient__name", "patient__patient_id", "claim__claim_id", "assigned_to")
-    ordering = ("-priority", "due_date")
+for _name in dir(m):
+    _obj = getattr(m, _name)
+    try:
+        if (isinstance(_obj, type) and issubclass(_obj, m.models.Model)
+                and _obj._meta.app_label == 'billing'
+                and not _obj._meta.abstract):
+            admin.site.register(_obj)
+    except Exception:
+        pass

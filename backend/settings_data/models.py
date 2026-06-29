@@ -260,7 +260,7 @@ class ChartAccount(models.Model):
     account_type = models.CharField(max_length=100, blank=True)
     description = models.CharField(max_length=500, blank=True)
     transaction_type = models.CharField(
-        max_length=10, choices=TransactionType.choices, default=TransactionType.Credit
+        max_length=10, choices=TransactionType.choices, default=TransactionType.CREDIT
     )
     default_mapping = models.CharField(max_length=255, blank=True)
     status = models.CharField(max_length=10, choices=Status.choices, default=Status.ACTIVE)

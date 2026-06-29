@@ -1,18 +1,12 @@
 from django.contrib import admin
-from .models import Patient, PatientInsurance
+from . import models as m
 
-
-@admin.register(Patient)
-class PatientAdmin(admin.ModelAdmin):
-    list_display = ("patient_id", "name", "dob", "sex", "status", "primary_insurance", "balance")
-    list_filter = ("status", "sex")
-    search_fields = ("patient_id", "name", "account_number", "primary_insurance")
-    ordering = ("name",)
-
-
-@admin.register(PatientInsurance)
-class PatientInsuranceAdmin(admin.ModelAdmin):
-    list_display = ("patient", "payer_name", "priority", "member_id", "group_number")
-    list_filter = ("priority",)
-    search_fields = ("patient__name", "patient__patient_id", "payer_name", "member_id")
-    ordering = ("patient", "priority")
+for _name in dir(m):
+    _obj = getattr(m, _name)
+    try:
+        if (isinstance(_obj, type) and issubclass(_obj, m.models.Model)
+                and _obj._meta.app_label == 'patients'
+                and not _obj._meta.abstract):
+            admin.site.register(_obj)
+    except Exception:
+        pass
