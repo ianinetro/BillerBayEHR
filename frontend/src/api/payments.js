@@ -27,9 +27,7 @@ export function matchException(paymentId, exceptionId, claimId, notes = '') {
 export function importERA(file) {
   const form = new FormData();
   form.append('file', file);
-  return client.post('/payments/import-era/', form, {
-    headers: { 'Content-Type': 'multipart/form-data' },
-  }).then(r => r.data);
+  return client.post('/payments/import-era/', form).then(r => r.data);
 }
 
 export function getERADashboard() {
