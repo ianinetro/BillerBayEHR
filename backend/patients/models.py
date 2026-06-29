@@ -72,6 +72,19 @@ class Patient(models.Model):
         verbose_name = "Patient"
         verbose_name_plural = "Patients"
 
+    def save(self, *args, **kwargs):
+        if not self.patient_id:
+            last = Patient.objects.order_by("patient_id").last()
+            if last:
+                try:
+                    seq = int(last.patient_id.lstrip("P")) + 1
+                except (ValueError, AttributeError):
+                    seq = 10001
+            else:
+                seq = 10001
+            self.patient_id = f"P{seq:05d}"
+        super().save(*args, **kwargs)
+
     def __str__(self):
         return f"{self.name} ({self.patient_id})"
 
