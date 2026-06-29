@@ -1,5 +1,3 @@
-version: "3.9"
-
 # Frontend is served by Cloudflare Pages.
 # This compose file runs: PostgreSQL + Redis + Django API (gunicorn) + Celery worker + nginx.
 
