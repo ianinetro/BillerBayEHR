@@ -1,0 +1,49 @@
+version: "3.9"
+
+services:
+  db:
+    image: postgres:15
+    environment:
+      POSTGRES_DB: clinictraq
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: clinictraq
+    ports:
+      - "5432:5432"
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  backend:
+    build: ./backend
+    command: sh -c "python manage.py migrate && python manage.py runserver 0.0.0.0:8000"
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: postgres://postgres:clinictraq@db:5432/clinictraq
+      DB_NAME: clinictraq
+      DB_USER: postgres
+      DB_PASSWORD: clinictraq
+      DB_HOST: db
+      DB_PORT: 5432
+      SECRET_KEY: dev-secret-key-change-in-production
+      DEBUG: "True"
+    depends_on:
+      - db
+    volumes:
+      - ./backend:/app
+    restart: unless-stopped
+
+  frontend:
+    build: ./frontend
+    command: npm run dev -- --host
+    ports:
+      - "5173:5173"
+    depends_on:
+      - backend
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    restart: unless-stopped
+
+volumes:
+  pg_data:
