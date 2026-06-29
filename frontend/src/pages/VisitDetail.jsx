@@ -107,11 +107,58 @@ function InfoTab({ visit }) {
   );
 }
 
+function useCodeSearch(apiPath, term) {
+  const [results, setResults] = useState([]);
+  React.useEffect(() => {
+    if (!term || term.length < 2) { setResults([]); return; }
+    const ctrl = new AbortController();
+    fetch(`https://clinicaltables.nlm.nih.gov/api/${apiPath}/v3/search?terms=${encodeURIComponent(term)}&maxList=8`, { signal: ctrl.signal })
+      .then(r => r.json())
+      .then(d => {
+        const codes = d[1] || [];
+        const names = d[3] || [];
+        setResults(codes.map((c, i) => ({ code: c, name: names[i]?.[0] || '' })));
+      })
+      .catch(() => {});
+    return () => ctrl.abort();
+  }, [term, apiPath]);
+  return results;
+}
+
+function CodeAutocomplete({ value, onChange, onSelect, placeholder, apiPath, label }) {
+  const results = useCodeSearch(apiPath, value);
+  const [open, setOpen] = useState(false);
+  return (
+    <div style={{ position: 'relative' }}>
+      <input
+        className="input" style={{ width: '100%' }}
+        value={value}
+        onChange={e => { onChange(e.target.value); setOpen(true); }}
+        onFocus={() => setOpen(true)}
+        onBlur={() => setTimeout(() => setOpen(false), 150)}
+        placeholder={placeholder}
+        autoFocus
+      />
+      {open && results.length > 0 && (
+        <div style={{ position: 'absolute', zIndex: 99, background: '#fff', border: '1px solid #ddd', borderRadius: 6, width: '100%', boxShadow: '0 4px 12px rgba(0,0,0,.1)', maxHeight: 220, overflowY: 'auto' }}>
+          {results.map(r => (
+            <div key={r.code}
+              style={{ padding: '8px 12px', cursor: 'pointer', borderBottom: '1px solid #f0f0f0', fontSize: 13 }}
+              onMouseDown={() => { onSelect(r); setOpen(false); }}>
+              <strong>{r.code}</strong> — {r.name}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function BillingTab({ visit, toast, qc }) {
   const [showAddDx, setShowAddDx] = useState(false);
   const [dxForm, setDxForm] = useState({ icd_code: '', description: '', pointer: 'A' });
   const [showAddSvc, setShowAddSvc] = useState(false);
-  const [svcForm, setSvcForm] = useState({ cpt_code: '', modifiers: '', charge: '', units: '1' });
+  const [svcForm, setSvcForm] = useState({ cpt_code: '', modifiers: '', charge: '', units: '1', from_dos: visit.date_of_service || '', pos: '11' });
 
   const { data: dxData } = useQuery({ queryKey: ['visit-dx', visit.id], queryFn: () => listDiagnosisLines(visit.id) });
   const dxLines = dxData?.results || (Array.isArray(dxData) ? dxData : []);
@@ -121,8 +168,8 @@ function BillingTab({ visit, toast, qc }) {
 
   const addDxMut = useMutation({
     mutationFn: () => createDiagnosisLine(visit.id, dxForm),
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ['visit-dx', visit.id] }); setShowAddDx(false); toast.success('Diagnosis added.'); },
-    onError: () => toast.error('Failed to add diagnosis.'),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['visit-dx', visit.id] }); setShowAddDx(false); setDxForm({ icd_code: '', description: '', pointer: 'A' }); toast.success('Diagnosis added.'); },
+    onError: e => toast.error(e.response?.data?.detail || 'Failed to add diagnosis.'),
   });
 
   const deleteDxMut = useMutation({
@@ -132,8 +179,11 @@ function BillingTab({ visit, toast, qc }) {
 
   const addSvcMut = useMutation({
     mutationFn: () => createServiceLine(visit.id, { ...svcForm, charge: Number(svcForm.charge), units: Number(svcForm.units) }),
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ['visit-svc', visit.id] }); setShowAddSvc(false); toast.success('Service line added.'); },
-    onError: () => toast.error('Failed to add service line.'),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['visit-svc', visit.id] }); setShowAddSvc(false); setSvcForm({ cpt_code: '', modifiers: '', charge: '', units: '1', from_dos: visit.date_of_service || '', pos: '11' }); toast.success('Service line added.'); },
+    onError: e => {
+      const d = e.response?.data;
+      toast.error(d?.detail || (typeof d === 'object' ? JSON.stringify(d) : '') || 'Failed to add service line.');
+    },
   });
 
   const deleteSvcMut = useMutation({
@@ -170,11 +220,12 @@ function BillingTab({ visit, toast, qc }) {
       {svcLines.length === 0
         ? <p className="muted">No service lines. Add CPT codes before creating a claim.</p>
         : <table className="table">
-            <thead><tr><th>CPT</th><th>Modifiers</th><th>Units</th><th className="right">Charge</th><th></th></tr></thead>
+            <thead><tr><th>CPT</th><th>Modifiers</th><th>Units</th><th>DOS</th><th>POS</th><th className="right">Charge</th><th></th></tr></thead>
             <tbody>
               {svcLines.map(s => (
                 <tr key={s.id}>
                   <td>{s.cpt_code}</td><td>{s.modifiers || '—'}</td><td>{s.units}</td>
+                  <td>{s.from_dos}</td><td>{s.pos}</td>
                   <td className="right">{fmt(s.charge)}</td>
                   <td><button className="btn sm danger" onClick={() => deleteSvcMut.mutate(s.id)}>Remove</button></td>
                 </tr>
@@ -184,19 +235,41 @@ function BillingTab({ visit, toast, qc }) {
 
       <Modal open={showAddDx} title="Add diagnosis code" onClose={() => setShowAddDx(false)}
         footer={<><button className="btn ghost" onClick={() => setShowAddDx(false)}>Cancel</button><button className="btn primary" onClick={() => addDxMut.mutate()} disabled={addDxMut.isPending}>{addDxMut.isPending ? 'Adding…' : 'Add'}</button></>}>
-        <div className="field"><label>ICD-10 code *</label><input className="input" style={{ width: '100%' }} value={dxForm.icd_code} onChange={e => setDxForm(f => ({ ...f, icd_code: e.target.value }))} placeholder="M25.561" autoFocus /></div>
+        <div className="field">
+          <label>ICD-10 code *</label>
+          <CodeAutocomplete
+            apiPath="icd10cm"
+            value={dxForm.icd_code}
+            onChange={v => setDxForm(f => ({ ...f, icd_code: v }))}
+            onSelect={r => setDxForm(f => ({ ...f, icd_code: r.code, description: r.name }))}
+            placeholder="Search by code or description…"
+          />
+        </div>
         <div className="field"><label>Description</label><input className="input" style={{ width: '100%' }} value={dxForm.description} onChange={e => setDxForm(f => ({ ...f, description: e.target.value }))} placeholder="Right knee pain" /></div>
       </Modal>
 
       <Modal open={showAddSvc} title="Add service line" onClose={() => setShowAddSvc(false)}
         footer={<><button className="btn ghost" onClick={() => setShowAddSvc(false)}>Cancel</button><button className="btn primary" onClick={() => addSvcMut.mutate()} disabled={addSvcMut.isPending}>{addSvcMut.isPending ? 'Adding…' : 'Add'}</button></>}>
         <div className="form-row">
-          <div className="field"><label>CPT/HCPCS *</label><input className="input" value={svcForm.cpt_code} onChange={e => setSvcForm(f => ({ ...f, cpt_code: e.target.value }))} placeholder="99214" autoFocus /></div>
+          <div className="field">
+            <label>CPT/HCPCS *</label>
+            <CodeAutocomplete
+              apiPath="cpt"
+              value={svcForm.cpt_code}
+              onChange={v => setSvcForm(f => ({ ...f, cpt_code: v }))}
+              onSelect={r => setSvcForm(f => ({ ...f, cpt_code: r.code }))}
+              placeholder="Search CPT…"
+            />
+          </div>
           <div className="field"><label>Modifiers</label><input className="input" value={svcForm.modifiers} onChange={e => setSvcForm(f => ({ ...f, modifiers: e.target.value }))} placeholder="25 RT" /></div>
         </div>
         <div className="form-row">
           <div className="field"><label>Charge ($) *</label><input className="input" type="number" min="0" step="0.01" value={svcForm.charge} onChange={e => setSvcForm(f => ({ ...f, charge: e.target.value }))} placeholder="180.00" /></div>
           <div className="field"><label>Units</label><input className="input" type="number" min="1" value={svcForm.units} onChange={e => setSvcForm(f => ({ ...f, units: e.target.value }))} /></div>
+        </div>
+        <div className="form-row">
+          <div className="field"><label>Date of service *</label><input className="input" type="date" value={svcForm.from_dos} onChange={e => setSvcForm(f => ({ ...f, from_dos: e.target.value }))} /></div>
+          <div className="field" style={{ maxWidth: 100 }}><label>POS</label><input className="input" value={svcForm.pos} onChange={e => setSvcForm(f => ({ ...f, pos: e.target.value }))} placeholder="11" maxLength={5} /></div>
         </div>
       </Modal>
     </>

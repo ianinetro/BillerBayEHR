@@ -13,7 +13,7 @@ import {
   listDiagnosisCodes, createDiagnosisCode,
   listChartAccounts,
   getClaimDefaults, updateClaimDefaults,
-  listUsers,
+  listUsers, createUser,
 } from '../api/settings';
 
 const GROUPS = ['practice setup', 'users and access', 'providers', 'billing providers', 'facilities', 'payers', 'CPT codes', 'diagnosis codes', 'chart accounts', 'claim defaults', 'security'];
@@ -145,7 +145,7 @@ function PracticeSetup({ toast }) {
   return (
     <FieldGrid
       fields={[
-        ['Company name', form.name || '', 'name', v => set('name', v)],
+        ['Company name', form.company_name || '', 'company_name', v => set('company_name', v)],
         ['Phone', form.phone || '', 'phone', v => set('phone', v)],
         ['Fax', form.fax || '', 'fax', v => set('fax', v)],
         ['Address', form.address || '', 'address', v => set('address', v)],
@@ -203,7 +203,7 @@ function ProvidersTab({ toast }) {
 }
 
 /* ----- Billing Providers ----- */
-const BP_BLANK = { name: '', group_npi: '', tax_id: '', org_type: 'Group', status: 'Active' };
+const BP_BLANK = { name: '', group_npi: '', tax_id: '', organization_type: 'Group', status: 'Active' };
 function BillingProvidersTab({ toast }) {
   const qc = useQueryClient();
   const [showAdd, setShowAdd] = useState(false);
@@ -221,12 +221,12 @@ function BillingProvidersTab({ toast }) {
       <CrudTable
         headers={['Name', 'Group NPI', 'Tax ID', 'Org type', 'Status']}
         loading={isLoading}
-        rows={items.map(p => ({ _id: p.id, _raw: p, _cells: [p.name, p.group_npi || p.npi || '—', p.tax_id || '—', p.org_type || '—', <Badge key="s" status={p.status} />] }))}
+        rows={items.map(p => ({ _id: p.id, _raw: p, _cells: [p.name, p.group_npi || '—', p.tax_id || '—', p.organization_type || '—', <Badge key="s" status={p.status} />] }))}
         onAdd={() => { setForm(BP_BLANK); setShowAdd(true); }} addLabel="Billing Provider"
       />
       <Modal open={showAdd} title="Add billing provider" onClose={() => setShowAdd(false)}
         footer={<><button className="btn ghost" onClick={() => setShowAdd(false)}>Cancel</button><button className="btn primary" onClick={() => saveMut.mutate(form)} disabled={saveMut.isPending}>{saveMut.isPending ? 'Saving…' : 'Save'}</button></>}>
-        {['name', 'group_npi', 'tax_id', 'org_type'].map(k => (
+        {['name', 'group_npi', 'tax_id', 'organization_type'].map(k => (
           <div className="field" key={k}><label>{k.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())}</label><input className="input" style={{ width: '100%' }} value={form[k]} onChange={e => set(k, e.target.value)} /></div>
         ))}
       </Modal>
@@ -433,24 +433,78 @@ function ClaimDefaultsTab({ toast }) {
 }
 
 /* ----- Users ----- */
+const USER_BLANK = { username: '', email: '', password: '', role: 'Billing team member', office_access: '', status: 'Active' };
 function UsersTab() {
+  const qc = useQueryClient();
+  const toast = useToast();
+  const [showAdd, setShowAdd] = useState(false);
+  const [form, setForm] = useState(USER_BLANK);
+  const [formErr, setFormErr] = useState('');
   const { data, isLoading } = useQuery({ queryKey: ['users'], queryFn: () => listUsers({ page_size: 200 }) });
   const items = data?.results || [];
+  const saveMut = useMutation({
+    mutationFn: createUser,
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['users'] });
+      setShowAdd(false);
+      setForm(USER_BLANK);
+      setFormErr('');
+      toast.success('User created.');
+    },
+    onError: e => {
+      const d = e.response?.data;
+      setFormErr(d?.detail || (typeof d === 'object' ? JSON.stringify(d) : '') || 'Failed to create user.');
+    },
+  });
+  const set = (k, v) => setForm(f => ({ ...f, [k]: v }));
   return (
-    <CrudTable
-      headers={['User', 'Role', 'Office access', 'Status', 'Last login']}
-      loading={isLoading}
-      rows={items.map(u => ({
-        _id: u.id, _raw: u,
-        _cells: [
-          u.full_name || u.user || '—',
-          u.role || '—',
-          u.office_access || 'All offices',
-          <Badge key="s" status={u.status || 'Active'} />,
-          u.last_login ? new Date(u.last_login).toLocaleDateString() : '—',
-        ],
-      }))}
-    />
+    <>
+      <CrudTable
+        headers={['Username', 'Email', 'Role', 'Status', 'Last login']}
+        loading={isLoading}
+        rows={items.map(u => ({
+          _id: u.id, _raw: u,
+          _cells: [
+            u.username,
+            u.email || '—',
+            u.role || '—',
+            <Badge key="s" status={u.status || 'Active'} />,
+            u.last_login ? new Date(u.last_login).toLocaleDateString() : '—',
+          ],
+        }))}
+        onAdd={() => { setForm(USER_BLANK); setFormErr(''); setShowAdd(true); }}
+        addLabel="User"
+      />
+      <Modal open={showAdd} title="Add user" onClose={() => setShowAdd(false)}
+        footer={<><button className="btn ghost" onClick={() => setShowAdd(false)}>Cancel</button><button className="btn primary" onClick={() => { if (!form.username.trim()) { setFormErr('Username is required.'); return; } if (!form.password) { setFormErr('Password is required.'); return; } setFormErr(''); saveMut.mutate(form); }} disabled={saveMut.isPending}>{saveMut.isPending ? 'Creating…' : 'Create user'}</button></>}>
+        {formErr && <div className="alert danger" style={{ marginBottom: 8 }}>{formErr}</div>}
+        <div className="form-row">
+          <div className="field"><label>Username *</label><input className="input" style={{ width: '100%' }} value={form.username} onChange={e => set('username', e.target.value)} autoFocus /></div>
+          <div className="field"><label>Email</label><input className="input" type="email" style={{ width: '100%' }} value={form.email} onChange={e => set('email', e.target.value)} /></div>
+        </div>
+        <div className="field"><label>Password *</label><input className="input" type="password" style={{ width: '100%' }} value={form.password} onChange={e => set('password', e.target.value)} /></div>
+        <div className="form-row">
+          <div className="field">
+            <label>Role</label>
+            <select className="input" value={form.role} onChange={e => set('role', e.target.value)}>
+              <option>Admin</option>
+              <option>Billing team member</option>
+              <option>Payment poster</option>
+              <option>Provider</option>
+              <option>Read-only</option>
+            </select>
+          </div>
+          <div className="field">
+            <label>Status</label>
+            <select className="input" value={form.status} onChange={e => set('status', e.target.value)}>
+              <option>Active</option>
+              <option>Inactive</option>
+            </select>
+          </div>
+        </div>
+        <div className="field"><label>Office access</label><input className="input" style={{ width: '100%' }} value={form.office_access} onChange={e => set('office_access', e.target.value)} placeholder="Leave blank for all offices" /></div>
+      </Modal>
+    </>
   );
 }
 
