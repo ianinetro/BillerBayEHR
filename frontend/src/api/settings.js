@@ -51,4 +51,5 @@ export const updateClaimDefaults = (id, d) => client.patch(`/settings/claim-defa
 
 // Users / access
 export const listUsers = (p = {}) => client.get('/settings/user-access/', { params: p }).then(r => r.data);
+export const createUser = (d) => client.post('/settings/user-access/', d).then(r => r.data);
 export const updateUser = (id, d) => client.patch(`/settings/user-access/${id}/`, d).then(r => r.data);

@@ -6,7 +6,12 @@ import Modal from '../components/Modal';
 import { listPatients, createPatient } from '../api/patients';
 
 const fmt = n => '$' + Number(n).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-const BLANK = { name: '', dob: '', sex: 'M', status: 'Active', primary_insurance: '', secondary_insurance: '' };
+const BLANK = {
+  name: '', dob: '', sex: 'M', status: 'Active',
+  primary_insurance: '', secondary_insurance: '',
+  phone: '', email: '', address: '', city: '', state: '', zip: '',
+  account_number: '',
+};
 
 export default function Patients() {
   const navigate = useNavigate();
@@ -162,6 +167,8 @@ export default function Patients() {
         }
       >
         {formErr && <div className="alert danger" style={{ marginBottom: 4 }}>{formErr}</div>}
+
+        <div className="sectionTitle" style={{ marginBottom: 8 }}>Demographics</div>
         <div className="form-row">
           <div className="field">
             <label>Full name *</label>
@@ -190,6 +197,38 @@ export default function Patients() {
             </select>
           </div>
         </div>
+        <div className="form-row">
+          <div className="field">
+            <label>Phone</label>
+            <input className="input" value={form.phone} onChange={e => set('phone', e.target.value)} placeholder="(555) 000-0000" />
+          </div>
+          <div className="field">
+            <label>Email</label>
+            <input className="input" type="email" value={form.email} onChange={e => set('email', e.target.value)} placeholder="patient@email.com" />
+          </div>
+        </div>
+
+        <div className="sectionTitle" style={{ margin: '14px 0 8px' }}>Address</div>
+        <div className="field">
+          <label>Street address</label>
+          <input className="input" style={{ width: '100%' }} value={form.address} onChange={e => set('address', e.target.value)} placeholder="123 Main St" />
+        </div>
+        <div className="form-row">
+          <div className="field">
+            <label>City</label>
+            <input className="input" value={form.city} onChange={e => set('city', e.target.value)} placeholder="Springfield" />
+          </div>
+          <div className="field" style={{ maxWidth: 80 }}>
+            <label>State</label>
+            <input className="input" value={form.state} onChange={e => set('state', e.target.value)} placeholder="IL" maxLength={2} />
+          </div>
+          <div className="field" style={{ maxWidth: 100 }}>
+            <label>ZIP</label>
+            <input className="input" value={form.zip} onChange={e => set('zip', e.target.value)} placeholder="62701" />
+          </div>
+        </div>
+
+        <div className="sectionTitle" style={{ margin: '14px 0 8px' }}>Insurance</div>
         <div className="form-row">
           <div className="field">
             <label>Primary insurance</label>

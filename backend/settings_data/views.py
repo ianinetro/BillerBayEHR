@@ -184,3 +184,28 @@ class UserAccessViewSet(viewsets.ModelViewSet):
     search_fields = ["username", "email"]
     filterset_fields = ["status", "role", "mfa_enabled"]
     ordering = ["username"]
+
+    def create(self, request, *args, **kwargs):
+        from django.contrib.auth.models import User as DjangoUser
+        from rest_framework.response import Response
+        from rest_framework import status as http_status
+
+        data = request.data
+        username = data.get("username", "").strip()
+        password = data.get("password", "").strip()
+        email = data.get("email", "").strip()
+
+        if not username:
+            return Response({"detail": "Username is required."}, status=http_status.HTTP_400_BAD_REQUEST)
+        if not password:
+            return Response({"detail": "Password is required."}, status=http_status.HTTP_400_BAD_REQUEST)
+        if DjangoUser.objects.filter(username=username).exists():
+            return Response({"detail": "A user with that username already exists."}, status=http_status.HTTP_400_BAD_REQUEST)
+
+        django_user = DjangoUser.objects.create_user(username=username, password=password, email=email)
+
+        ua_data = {k: v for k, v in data.items() if k != "password"}
+        serializer = self.get_serializer(data=ua_data)
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        return Response(serializer.data, status=http_status.HTTP_201_CREATED)
